@@ -255,6 +255,7 @@ public struct PocketTtsSynthesizer {
         temperature: Float = PocketTtsConstants.temperature,
         seed: UInt64? = nil
     ) async throws -> PocketTtsSession {
+        let makeSessionStart = CFAbsoluteTimeGetCurrent()
         let store = try currentModelStore()
 
         let condModel = try await store.condStep()
@@ -266,6 +267,7 @@ public struct PocketTtsSynthesizer {
         //    loop in `prefillKVCacheVoice` would be a no-op anyway).
         //  - Cloned voices (flat audio prompt): feed every voice token
         //    through cond_step.
+        let voicePrefillStart = CFAbsoluteTimeGetCurrent()
         let voiceKVSnapshot: KVCacheState
         if let snapshot = voiceData.cacheSnapshot {
             voiceKVSnapshot = try kvCacheStateFromSnapshot(
@@ -277,12 +279,20 @@ public struct PocketTtsSynthesizer {
                 layerKeys: condLayerKeys
             )
         }
+        let voicePrefillMs = (CFAbsoluteTimeGetCurrent() - voicePrefillStart) * 1000
+        let hasSnapshot = voiceData.cacheSnapshot != nil
+        logger.info(
+            "[Timing] makeSession voicePrefill=\(String(format: "%.0f", voicePrefillMs))ms (snapshot=\(hasSnapshot)) layers=\(condLayerKeys.layerCount)"
+        )
 
-        return try await makeSession(
+        let session = try await makeSession(
             voiceKVSnapshot: voiceKVSnapshot,
             temperature: temperature,
             seed: seed
         )
+        let totalMs = (CFAbsoluteTimeGetCurrent() - makeSessionStart) * 1000
+        logger.notice("[Timing] makeSession total=\(String(format: "%.0f", totalMs))ms")
+        return session
     }
 
     /// Create a persistent session from an already-expanded voice KV blueprint.

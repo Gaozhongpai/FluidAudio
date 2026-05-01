@@ -362,3 +362,34 @@ try await manager.synthesizeToFile(
 
 - **PocketTTS models**: CC-BY-4.0, inherited from [kyutai/pocket-tts](https://huggingface.co/kyutai/pocket-tts)
 - **FluidAudio SDK**: Apache 2.0 licensed (no GPL dependencies)
+
+
+Next best steps, in order:
+
+1. **Device-profile before more surgery**
+   We’ve removed a lot of Swift allocation churn. The next real bottleneck may now be CoreML/GPU compute, not Swift code. Run Instruments on device with:
+   - Allocations
+   - Time Profiler
+   - Metal System Trace if available
+   - VM Tracker
+
+2. **Measure PocketTTS timings in logs**
+   Add lightweight timestamps around:
+   - `makeSession`
+   - first `session.enqueue`
+   - first `session.frames` yield
+   - per-sentence completion
+   - playback start
+
+   This gives practical TTFA numbers without opening Instruments every time.
+
+3. **Coalesce audio frames after first frame**
+   Keep the first 80ms frame immediate, then combine later frames into 160ms or 240ms buffers before scheduling playback. This may reduce `AVAudioPlayerNode.scheduleBuffer` overhead and playback jitter.
+
+4. **Commit current FluidAudio batch**
+   The current changes build and are worthwhile. I’d commit before more invasive changes.
+
+5. **Try direct `AVAudioPCMBuffer` output**
+   Bigger API change: have FluidAudio optionally yield `AVAudioPCMBuffer` or caller-filled buffers instead of `[Float]`. This reduces app-side copies, but it couples FluidAudio to AVFoundation more tightly.
+
+My recommendation: **commit this batch**, then add **timing probes** so we know whether the next bottleneck is session creation, first frame generation, per-frame generation, or playback scheduling.
