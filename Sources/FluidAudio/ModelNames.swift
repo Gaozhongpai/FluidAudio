@@ -23,7 +23,10 @@ public enum Repo: String, CaseIterable, Sendable {
     case kokoro = "FluidInference/kokoro-82m-coreml"
     case kokoroAne = "FluidInference/kokoro-82m-coreml/ANE"
     case sortformer = "FluidInference/diar-streaming-sortformer-coreml"
-    case lseend = "FluidInference/ls-eend-coreml"
+    case lseendAmi = "FluidInference/ls-eend-coreml/optimized/ami"
+    case lseendCallHome = "FluidInference/ls-eend-coreml/optimized/ch"
+    case lseendDihard2 = "FluidInference/ls-eend-coreml/optimized/dih2"
+    case lseendDihard3 = "FluidInference/ls-eend-coreml/optimized/dih3"
     case pocketTts = "FluidInference/pocket-tts-coreml"
     case qwen3Asr = "FluidInference/qwen3-asr-0.6b-coreml/f32"
     case qwen3AsrInt8 = "FluidInference/qwen3-asr-0.6b-coreml/int8"
@@ -73,8 +76,14 @@ public enum Repo: String, CaseIterable, Sendable {
             return "kokoro-82m-coreml/ANE"
         case .sortformer:
             return "diar-streaming-sortformer-coreml"
-        case .lseend:
-            return "ls-eend-coreml"
+        case .lseendAmi:
+            return "ls-eend-coreml/optimized/ami"
+        case .lseendCallHome:
+            return "ls-eend-coreml/optimized/ch"
+        case .lseendDihard2:
+            return "ls-eend-coreml/optimized/dih2"
+        case .lseendDihard3:
+            return "ls-eend-coreml/optimized/dih3"
         case .pocketTts:
             return "pocket-tts-coreml"
         case .qwen3Asr:
@@ -111,7 +120,7 @@ public enum Repo: String, CaseIterable, Sendable {
             return "FluidInference/nemotron-speech-streaming-en-0.6b-coreml"
         case .sortformer:
             return "FluidInference/diar-streaming-sortformer-coreml"
-        case .lseend:
+        case .lseendAmi, .lseendCallHome, .lseendDihard2, .lseendDihard3:
             return "FluidInference/ls-eend-coreml"
         case .qwen3Asr, .qwen3AsrInt8:
             return "FluidInference/qwen3-asr-0.6b-coreml"
@@ -147,6 +156,14 @@ public enum Repo: String, CaseIterable, Sendable {
             return "nemotron_coreml_160ms"
         case .nemotronStreaming80:
             return "nemotron_coreml_80ms"
+        case .lseendAmi:
+            return "optimized/ami"
+        case .lseendCallHome:
+            return "optimized/ch"
+        case .lseendDihard2:
+            return "optimized/dih2"
+        case .lseendDihard3:
+            return "optimized/dih3"
         case .cohereTranscribeCoreml:
             return "q8"
         default:
@@ -187,6 +204,14 @@ public enum Repo: String, CaseIterable, Sendable {
             return "parakeet-ja"
         case .parakeetTdtCtc110m:
             return "parakeet-tdt-ctc-110m"
+        case .lseendAmi:
+            return "ls-eend/ami"
+        case .lseendCallHome:
+            return "ls-eend/ch"
+        case .lseendDihard2:
+            return "ls-eend/dih2"
+        case .lseendDihard3:
+            return "ls-eend/dih3"
         case .cosyvoice3:
             return "cosyvoice3"
         case .cohereTranscribeCoreml:
@@ -197,6 +222,21 @@ public enum Repo: String, CaseIterable, Sendable {
             return "styletts2"
         default:
             return name.replacingOccurrences(of: "-coreml", with: "")
+        }
+    }
+}
+
+/// Encoder precision for the v3 Parakeet TDT 0.6B encoder.
+public enum ParakeetEncoderPrecision: String, Sendable, CaseIterable {
+    case int8
+    case int4
+
+    public var encoderFileName: String {
+        switch self {
+        case .int8:
+            return ModelNames.ASR.encoderFile
+        case .int4:
+            return ModelNames.ASR.encoderInt4File
         }
     }
 }
@@ -263,10 +303,11 @@ public enum ModelNames {
         /// Joint decoder variant for v3 that exposes top-K outputs
         /// (`top_k_ids`, `top_k_logits`) used for language-aware script filtering.
         public static let jointV3File = "JointDecisionv3.mlmodelc"
+        public static let encoderInt4File = "EncoderInt4.mlmodelc"
         public static let ctcHeadFile = ctcHead + ".mlmodelc"
 
         /// Required models for v2 / legacy split-frontend loaders.
-        /// v3 uses `requiredModelsV3` (with `jointV3File`).
+        /// v3 uses `requiredModelsV3(precision:)` (with `jointV3File`).
         public static let requiredModels: Set<String> = [
             preprocessorFile,
             encoderFile,
@@ -274,14 +315,16 @@ public enum ModelNames {
             jointFile,
         ]
 
-        /// Required models for v3. v3 always uses `JointDecisionv3.mlmodelc`
-        /// (with top-K outputs for language-aware script filtering).
-        public static let requiredModelsV3: Set<String> = [
-            preprocessorFile,
-            encoderFile,
-            decoderFile,
-            jointV3File,
-        ]
+        public static func requiredModelsV3(
+            precision: ParakeetEncoderPrecision = .int8
+        ) -> Set<String> {
+            [
+                preprocessorFile,
+                precision.encoderFileName,
+                decoderFile,
+                jointV3File,
+            ]
+        }
 
         /// Required models for fused frontend (110m hybrid: preprocessor contains encoder)
         public static let requiredModelsFused: Set<String> = [
@@ -507,52 +550,80 @@ public enum ModelNames {
 
     /// LS-EEND streaming diarization model names
     public enum LSEEND {
-        public enum Variant: String, CaseIterable, Sendable, CustomStringConvertible {
-            case ami = "AMI"
-            case callhome = "CALLHOME"
-            case dihard2 = "DIHARD II"
-            case dihard3 = "DIHARD III"
+        public enum Variant: CaseIterable, Sendable, CustomStringConvertible {
+            case ami
+            case callhome
+            case dihard2
+            case dihard3
+
+            public var repo: Repo {
+                switch self {
+                case .ami: return .lseendAmi
+                case .callhome: return .lseendCallHome
+                case .dihard2: return .lseendDihard2
+                case .dihard3: return .lseendDihard3
+                }
+            }
 
             public var name: String {
                 switch self {
                 case .ami:
-                    return "ls_eend_ami_step"
+                    return "ls_eend_ami"
                 case .callhome:
-                    return "ls_eend_callhome_step"
+                    return "ls_eend_ch"
                 case .dihard2:
-                    return "ls_eend_dih2_step"
+                    return "ls_eend_dih2"
                 case .dihard3:
-                    return "ls_eend_dih3_step"
+                    return "ls_eend_dih3"
                 }
             }
 
-            public var description: String { rawValue }
+            public var description: String { name }
 
-            public var stem: String { "\(rawValue)/\(name)" }
+            public func name(forStep step: StepSize) -> String {
+                "\(name)_\(step)"
+            }
 
-            public var modelFile: String { "\(stem).mlmodelc" }
+            public func fileName(forStep step: StepSize) -> String {
+                "\(step)/\(name)_\(step).mlmodelc"
+            }
+        }
 
-            public var configFile: String { "\(stem).json" }
+        public enum StepSize: Int, CaseIterable, Sendable, CustomStringConvertible {
+            case step100ms = 1
+            case step200ms = 2
+            case step300ms = 3
+            case step400ms = 4
+            case step500ms = 5
 
-            public var fileNames: [String] { [modelFile, configFile] }
+            public var description: String {
+                switch self {
+                case .step100ms: return "100ms"
+                case .step200ms: return "200ms"
+                case .step300ms: return "300ms"
+                case .step400ms: return "400ms"
+                case .step500ms: return "500ms"
+                }
+            }
         }
 
         /// Lowest latency for streaming
         public static let defaultVariant: Variant = .dihard3
+        public static let defaultStep: StepSize = .step100ms
 
         /// Bundle name for a specific variant
-        public static func bundle(for variant: Variant) -> [String] {
-            return variant.fileNames
+        public static func bundle(for variant: Variant, withStep step: StepSize) -> [String] {
+            return [variant.fileName(forStep: step)]
         }
 
         /// Default bundle name
         public static var defaultBundle: [String] {
-            return defaultVariant.fileNames
+            return [defaultVariant.fileName(forStep: defaultStep)]
         }
 
-        /// All Sortformer bundle models required by the downloader
+        /// All LS-EEND bundle models required by the downloader
         public static var requiredModels: Set<String> {
-            Set(Variant.allCases.flatMap(\.fileNames))
+            Set(Variant.allCases.flatMap { StepSize.allCases.map($0.fileName) })
         }
     }
 
@@ -645,7 +716,7 @@ public enum ModelNames {
     /// expected local directory layout is encoded in `CosyVoice3Constants.Files`.
     public enum CosyVoice3 {
         public static let llmPrefill = "LLM-Prefill-T256-M768-fp16"
-        public static let llmDecode = "LLM-Decode-M768-fp16-stateful"
+        public static let llmDecode = "LLM-Decode-M768-fp16"
         public static let flow = "Flow-N250-fp16"
         public static let hift = "HiFT-T500-fp16"
         public static let speechEmbeddings = "speech_embedding-fp16.safetensors"
@@ -937,7 +1008,8 @@ public enum ModelNames {
         case .vad:
             return ModelNames.VAD.requiredModels
         case .parakeetV3:
-            return ModelNames.ASR.requiredModelsV3
+            let precision = ParakeetEncoderPrecision(rawValue: variant ?? "") ?? .int8
+            return ModelNames.ASR.requiredModelsV3(precision: precision)
         case .parakeetV2:
             return ModelNames.ASR.requiredModels
         case .parakeetTdtCtc110m:
@@ -984,9 +1056,9 @@ public enum ModelNames {
                 return [variant]
             }
             return ModelNames.Sortformer.requiredModels
-        case .lseend:
+        case .lseendAmi, .lseendCallHome, .lseendDihard2, .lseendDihard3:
             if let variant = variant {
-                return [variant + ".mlmodelc", variant + ".json"]
+                return [variant + ".mlmodelc"]
             }
             return ModelNames.LSEEND.requiredModels
         case .qwen3Asr, .qwen3AsrInt8:
