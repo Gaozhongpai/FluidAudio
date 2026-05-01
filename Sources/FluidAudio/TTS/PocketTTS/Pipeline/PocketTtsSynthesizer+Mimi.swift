@@ -9,8 +9,9 @@ extension PocketTtsSynthesizer {
     /// and partial upsampling buffers. Unlike the KV cache (which resets per
     /// text chunk), Mimi state persists across all chunks to produce seamless
     /// audio — the decoder needs prior frame context for smooth waveform continuity.
-    struct MimiState {
+    struct MimiState: @unchecked Sendable {
         var tensors: [String: MLMultiArray]
+        let inputProvider: MimiDecoderInputProvider
     }
 
     /// Create the initial Mimi decoder state from the constants directory.
@@ -62,7 +63,12 @@ extension PocketTtsSynthesizer {
             tensors[name] = array
         }
 
-        return MimiState(tensors: tensors)
+        return MimiState(
+            tensors: tensors,
+            inputProvider: try MimiDecoderInputProvider(
+                stateInputNames: mimiKeys.stateMapping.map(\.0)
+            )
+        )
     }
 
     /// Clone a Mimi state for independent use.
@@ -72,7 +78,12 @@ extension PocketTtsSynthesizer {
         for (key, array) in state.tensors {
             newTensors[key] = try deepCopy(array)
         }
-        return MimiState(tensors: newTensors)
+        return MimiState(
+            tensors: newTensors,
+            inputProvider: try MimiDecoderInputProvider(
+                stateInputNames: Array(state.inputProvider.stateInputNames)
+            )
+        )
     }
 
     /// Run the Mimi decoder for a single latent frame.
@@ -91,28 +102,19 @@ extension PocketTtsSynthesizer {
         model: MLModel,
         mimiKeys: PocketTtsMimiKeys
     ) async throws -> [Float] {
-        // Create latent input: [1, 32]
-        let latentDim = PocketTtsConstants.latentDim
-        let latentArray = try MLMultiArray(
-            shape: [1, NSNumber(value: latentDim)], dataType: .float32)
-        let latentPtr = latentArray.dataPointer.bindMemory(to: Float.self, capacity: latentDim)
-        latent.withUnsafeBufferPointer { buffer in
-            guard let base = buffer.baseAddress else { return }
-            latentPtr.update(from: base, count: latentDim)
-        }
-
-        // Build input dictionary from discovered state mapping.
-        var inputDict: [String: Any] = ["latent": latentArray]
         for (inputName, _) in mimiKeys.stateMapping {
             guard let array = state.tensors[inputName] else {
                 throw PocketTTSError.processingFailed(
                     "Mimi state missing tensor '\(inputName)'")
             }
-            inputDict[inputName] = array
+            state.inputProvider.stateFeatureValues[inputName] = MLFeatureValue(multiArray: array)
         }
+        state.inputProvider.writeLatent(latent)
 
-        let input = try MLDictionaryFeatureProvider(dictionary: inputDict)
-        let output = try await model.compatPrediction(from: input, options: MLPredictionOptions())
+        let output = try await model.compatPrediction(
+            from: state.inputProvider,
+            options: state.inputProvider.predictionOptions
+        )
 
         // Extract audio output [1, 1, 1920]
         guard let audioArray = output.featureValue(for: mimiKeys.audioOutput)?.multiArrayValue else {
@@ -141,11 +143,57 @@ extension PocketTtsSynthesizer {
     /// uses the type-safe subscript accessor which handles conversion automatically.
     private static func readFloatArray(from array: MLMultiArray, count: Int) -> [Float] {
         if array.dataType == .float16 {
-            // Use subscript for correct float16 → float32 conversion
-            return (0..<count).map { array[$0].floatValue }
+            let ptr = array.dataPointer.bindMemory(to: UInt16.self, capacity: count)
+            var samples = [Float](repeating: 0, count: count)
+            for i in 0..<count {
+                samples[i] = Float(Float16(bitPattern: ptr[i]))
+            }
+            return samples
         }
         // Fast path for float32: direct memory access
         let ptr = array.dataPointer.bindMemory(to: Float.self, capacity: count)
         return Array(UnsafeBufferPointer(start: ptr, count: count))
+    }
+
+    final class MimiDecoderInputProvider: NSObject, MLFeatureProvider, @unchecked Sendable {
+        let stateInputNames: [String]
+        let predictionOptions = MLPredictionOptions()
+        private let latentFeatureValue: MLFeatureValue
+        private let allFeatureNames: Set<String>
+        private let latentArray: MLMultiArray
+        var stateFeatureValues: [String: MLFeatureValue]
+
+        var featureNames: Set<String> {
+            allFeatureNames
+        }
+
+        init(stateInputNames: [String]) throws {
+            self.stateInputNames = stateInputNames
+            self.allFeatureNames = Set(stateInputNames).union(["latent"])
+            self.latentArray = try MLMultiArray(
+                shape: [1, NSNumber(value: PocketTtsConstants.latentDim)],
+                dataType: .float32
+            )
+            self.latentFeatureValue = MLFeatureValue(multiArray: latentArray)
+            self.stateFeatureValues = [:]
+            self.stateFeatureValues.reserveCapacity(stateInputNames.count)
+            super.init()
+        }
+
+        func featureValue(for featureName: String) -> MLFeatureValue? {
+            if featureName == "latent" {
+                return latentFeatureValue
+            }
+            return stateFeatureValues[featureName]
+        }
+
+        func writeLatent(_ latent: [Float]) {
+            let latentDim = PocketTtsConstants.latentDim
+            let latentPtr = latentArray.dataPointer.bindMemory(to: Float.self, capacity: latentDim)
+            latent.withUnsafeBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return }
+                latentPtr.update(from: base, count: latentDim)
+            }
+        }
     }
 }

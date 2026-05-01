@@ -219,6 +219,7 @@ public struct PocketTtsSynthesizer {
         let bosEmb = try createBosEmbedding(constants.bosEmbedding)
         let seedValue = seed ?? UInt64.random(in: 0...UInt64.max)
         let chunkCount = chunks.count
+        let flowScratch = try FlowDecoderScratch(model: flowModel)
 
         let generator = StreamingGenerator(
             constants: constants,
@@ -233,6 +234,7 @@ public struct PocketTtsSynthesizer {
             mimiKeys: mimiKeys,
             mimiInitialState: mimiInitialState,
             bosEmb: bosEmb,
+            flowScratch: flowScratch,
             seedValue: seedValue,
             chunkCount: chunkCount,
             temperature: temperature
@@ -291,7 +293,7 @@ public struct PocketTtsSynthesizer {
             "Session voice prefill at position \(Int(voiceKVSnapshot.positions[0][0].floatValue))"
         )
 
-        let session = PocketTtsSession(
+        let session = try PocketTtsSession(
             voiceKVSnapshot: voiceKVSnapshot,
             mimiState: mimiState,
             constants: constants,
@@ -330,6 +332,7 @@ public struct PocketTtsSynthesizer {
         let mimiKeys: PocketTtsMimiKeys
         var mimiState: MimiState
         let bosEmb: MLMultiArray
+        let flowScratch: FlowDecoderScratch
         var rng: SeededRNG
         let chunkCount: Int
         let temperature: Float
@@ -347,6 +350,7 @@ public struct PocketTtsSynthesizer {
             mimiKeys: PocketTtsMimiKeys,
             mimiInitialState: MimiState,
             bosEmb: MLMultiArray,
+            flowScratch: FlowDecoderScratch,
             seedValue: UInt64,
             chunkCount: Int,
             temperature: Float
@@ -363,6 +367,7 @@ public struct PocketTtsSynthesizer {
             self.mimiKeys = mimiKeys
             self.mimiState = mimiInitialState
             self.bosEmb = bosEmb
+            self.flowScratch = flowScratch
             self.rng = SeededRNG(seed: seedValue)
             self.chunkCount = chunkCount
             self.temperature = temperature
@@ -381,7 +386,8 @@ public struct PocketTtsSynthesizer {
                 numSteps: PocketTtsConstants.numLsdSteps,
                 temperature: temperature,
                 model: flowModel,
-                rng: &localRng
+                rng: &localRng,
+                scratch: flowScratch
             )
             rng = localRng
             return result
@@ -432,12 +438,11 @@ public struct PocketTtsSynthesizer {
                     )
 
                     let tokenIds = constants.tokenizer.encode(normalizedChunk)
-                    let textEmbeddings = PocketTtsSynthesizer.embedTokens(
-                        tokenIds, constants: constants)
 
                     var kvState = try await PocketTtsSynthesizer.prefillKVCache(
                         voiceData: voiceData,
-                        textEmbeddings: textEmbeddings,
+                        tokenIds: tokenIds,
+                        constants: constants,
                         model: condModel,
                         layerKeys: condLayerKeys
                     )
@@ -780,31 +785,6 @@ public struct PocketTtsSynthesizer {
         }
 
         return sentences
-    }
-
-    // MARK: - Embedding
-
-    /// Look up text token embeddings from the embedding table.
-    ///
-    /// Vocab size is derived from the actual loaded table because each
-    /// language pack ships its own `text_embed_table` with potentially
-    /// different row counts (`PocketTtsConstants.vocabSize` is only the
-    /// English row count).
-    static func embedTokens(
-        _ tokenIds: [Int], constants: PocketTtsConstantsBundle
-    ) -> [[Float]] {
-        let dim = PocketTtsConstants.embeddingDim
-        let vocabSize = constants.textEmbedTable.count / dim
-        return tokenIds.map { id in
-            guard id >= 0, id < vocabSize else {
-                logger.warning("Token ID \(id) out of range [0, \(vocabSize)), clamping")
-                let clampedId = min(max(id, 0), vocabSize - 1)
-                let offset = clampedId * dim
-                return Array(constants.textEmbedTable[offset..<(offset + dim)])
-            }
-            let offset = id * dim
-            return Array(constants.textEmbedTable[offset..<(offset + dim)])
-        }
     }
 
     // MARK: - Helpers

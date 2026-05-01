@@ -68,6 +68,7 @@ public actor PocketTtsSession {
     private let bosEmb: MLMultiArray
     private let temperature: Float
     private var mimiState: PocketTtsSynthesizer.MimiState
+    private let flowScratch: PocketTtsSynthesizer.FlowDecoderScratch
     private var rng: SeededRNG
 
     // MARK: - Initialization
@@ -89,7 +90,7 @@ public actor PocketTtsSession {
         bosEmb: MLMultiArray,
         temperature: Float,
         seed: UInt64
-    ) {
+    ) throws {
         self.voiceKVSnapshot = voiceKVSnapshot
         self.mimiState = mimiState
         self.constants = constants
@@ -102,6 +103,7 @@ public actor PocketTtsSession {
         self.mimiKeys = mimiKeys
         self.bosEmb = bosEmb
         self.temperature = temperature
+        self.flowScratch = try PocketTtsSynthesizer.FlowDecoderScratch(model: flowModel)
         self.rng = SeededRNG(seed: seed)
 
         // Text queue channel
@@ -174,14 +176,13 @@ public actor PocketTtsSession {
         let (normalizedChunk, framesAfterEos) = PocketTtsSynthesizer.normalizeText(text)
         Self.logger.info("Session chunk \(chunkIndex): '\(normalizedChunk)'")
 
-        // Tokenize and embed
+        // Tokenize; prefill reads embeddings directly from the shared table.
         let tokenIds = constants.tokenizer.encode(normalizedChunk)
-        let textEmbeddings = PocketTtsSynthesizer.embedTokens(tokenIds, constants: constants)
 
         // Clone voice KV snapshot and prefill text tokens only
         var kvState = try PocketTtsSynthesizer.cloneKVCacheState(voiceKVSnapshot)
         kvState = try await PocketTtsSynthesizer.prefillKVCacheText(
-            state: kvState, textEmbeddings: textEmbeddings, model: condModel,
+            state: kvState, tokenIds: tokenIds, constants: constants, model: condModel,
             layerKeys: condLayerKeys
         )
 
@@ -220,7 +221,8 @@ public actor PocketTtsSession {
                 numSteps: PocketTtsConstants.numLsdSteps,
                 temperature: temperature,
                 model: flowModel,
-                rng: &localRng
+                rng: &localRng,
+                scratch: flowScratch
             )
             rng = localRng
 

@@ -16,6 +16,25 @@ extension PocketTtsSynthesizer {
         model: MLModel,
         rng: inout some RandomNumberGenerator
     ) async throws -> [Float] {
+        let scratch = try FlowDecoderScratch(model: model)
+        return try await flowDecode(
+            transformerOut: transformerOut,
+            numSteps: numSteps,
+            temperature: temperature,
+            model: model,
+            rng: &rng,
+            scratch: scratch
+        )
+    }
+
+    static func flowDecode(
+        transformerOut: MLMultiArray,
+        numSteps: Int,
+        temperature: Float,
+        model: MLModel,
+        rng: inout some RandomNumberGenerator,
+        scratch: FlowDecoderScratch
+    ) async throws -> [Float] {
         let latentDim = PocketTtsConstants.latentDim
         let dt: Float = 1.0 / Float(numSteps)
 
@@ -27,26 +46,21 @@ extension PocketTtsSynthesizer {
             latent[i] = Float.gaussianRandom(using: &rng) * scale
         }
 
-        // Flatten transformer_out from [1, 1, 1024] to [1, 1024]
-        let transformerFlat = try reshapeToFlat(transformerOut, dim: PocketTtsConstants.transformerDim)
+        scratch.writeTransformerOut(transformerOut)
 
         // Euler integration: 8 steps from t=0 to t=1
         for step in 0..<numSteps {
             let sValue = Float(step) * dt
             let tValue = Float(step + 1) * dt
 
-            let velocity = try await runFlowDecoderStep(
-                transformerOut: transformerFlat,
-                latent: latent,
+            try await applyFlowDecoderStep(
+                latent: &latent,
                 s: sValue,
                 t: tValue,
-                model: model
+                dt: dt,
+                model: model,
+                scratch: scratch
             )
-
-            // Euler step: latent += velocity * dt
-            for i in 0..<latentDim {
-                latent[i] += velocity[i] * dt
-            }
         }
 
         return latent
@@ -62,59 +76,86 @@ extension PocketTtsSynthesizer {
     ///
     /// The model predicts a velocity vector given the current noisy latent and time
     /// interval. The caller applies the Euler update: `latent += velocity * dt`.
-    private static func runFlowDecoderStep(
-        transformerOut: MLMultiArray,
-        latent: [Float],
+    private static func applyFlowDecoderStep(
+        latent: inout [Float],
         s: Float,
         t: Float,
-        model: MLModel
-    ) async throws -> [Float] {
+        dt: Float,
+        model: MLModel,
+        scratch: FlowDecoderScratch
+    ) async throws {
         let latentDim = PocketTtsConstants.latentDim
 
-        // Create latent MLMultiArray [1, 32]
-        let latentArray = try MLMultiArray(
-            shape: [1, NSNumber(value: latentDim)], dataType: .float32)
-        let latentPtr = latentArray.dataPointer.bindMemory(to: Float.self, capacity: latentDim)
-        latent.withUnsafeBufferPointer { buffer in
-            guard let base = buffer.baseAddress else { return }
-            latentPtr.update(from: base, count: latentDim)
-        }
+        scratch.writeLatent(latent)
+        scratch.sArray[0] = NSNumber(value: s)
+        scratch.tArray[0] = NSNumber(value: t)
 
-        // Create s and t MLMultiArrays [1, 1]
-        let sArray = try MLMultiArray(shape: [1, 1], dataType: .float32)
-        sArray[0] = NSNumber(value: s)
+        let output = try await model.compatPrediction(
+            from: scratch.inputProvider,
+            options: scratch.predictionOptions
+        )
 
-        let tArray = try MLMultiArray(shape: [1, 1], dataType: .float32)
-        tArray[0] = NSNumber(value: t)
-
-        let inputDict: [String: Any] = [
-            "transformer_out": transformerOut,
-            "latent": latentArray,
-            "s": sArray,
-            "t": tArray,
-        ]
-
-        let input = try MLDictionaryFeatureProvider(dictionary: inputDict)
-        let output = try await model.compatPrediction(from: input, options: MLPredictionOptions())
-
-        // Extract velocity — take the first (and likely only) output
-        let outputNames = Array(output.featureNames)
-        guard let velocityArray = output.featureValue(for: outputNames[0])?.multiArrayValue else {
+        guard let velocityArray = output.featureValue(for: scratch.velocityOutputName)?.multiArrayValue else {
             throw PocketTTSError.processingFailed("Missing flow decoder velocity output")
         }
 
         let velocityPtr = velocityArray.dataPointer.bindMemory(to: Float.self, capacity: latentDim)
-        return Array(UnsafeBufferPointer(start: velocityPtr, count: latentDim))
+        for i in 0..<latentDim {
+            latent[i] += velocityPtr[i] * dt
+        }
     }
 
-    /// Reshape a [1, 1, D] MLMultiArray to [1, D].
-    private static func reshapeToFlat(_ array: MLMultiArray, dim: Int) throws -> MLMultiArray {
-        let flat = try MLMultiArray(shape: [1, NSNumber(value: dim)], dataType: .float32)
-        let srcPtr = array.dataPointer.bindMemory(to: Float.self, capacity: dim)
-        let dstPtr = flat.dataPointer.bindMemory(to: Float.self, capacity: dim)
-        dstPtr.update(from: srcPtr, count: dim)
-        return flat
+    final class FlowDecoderScratch: @unchecked Sendable {
+        let transformerFlat: MLMultiArray
+        let latentArray: MLMultiArray
+        let sArray: MLMultiArray
+        let tArray: MLMultiArray
+        let inputProvider: MLDictionaryFeatureProvider
+        let predictionOptions = MLPredictionOptions()
+        let velocityOutputName: String
+
+        init(model: MLModel) throws {
+            let transformerDim = PocketTtsConstants.transformerDim
+            let latentDim = PocketTtsConstants.latentDim
+
+            transformerFlat = try MLMultiArray(
+                shape: [1, NSNumber(value: transformerDim)], dataType: .float32)
+
+            latentArray = try MLMultiArray(
+                shape: [1, NSNumber(value: latentDim)], dataType: .float32)
+            sArray = try MLMultiArray(shape: [1, 1], dataType: .float32)
+            tArray = try MLMultiArray(shape: [1, 1], dataType: .float32)
+
+            inputProvider = try MLDictionaryFeatureProvider(dictionary: [
+                "transformer_out": transformerFlat,
+                "latent": latentArray,
+                "s": sArray,
+                "t": tArray,
+            ])
+
+            guard let velocityOutputName = model.modelDescription.outputDescriptionsByName.keys.first else {
+                throw PocketTTSError.processingFailed("Missing flow decoder output name")
+            }
+            self.velocityOutputName = velocityOutputName
+        }
+
+        func writeTransformerOut(_ transformerOut: MLMultiArray) {
+            let transformerDim = PocketTtsConstants.transformerDim
+            let srcPtr = transformerOut.dataPointer.bindMemory(to: Float.self, capacity: transformerDim)
+            let dstPtr = transformerFlat.dataPointer.bindMemory(to: Float.self, capacity: transformerDim)
+            dstPtr.update(from: srcPtr, count: transformerDim)
+        }
+
+        func writeLatent(_ latent: [Float]) {
+            let latentDim = PocketTtsConstants.latentDim
+            let latentPtr = latentArray.dataPointer.bindMemory(to: Float.self, capacity: latentDim)
+            latent.withUnsafeBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return }
+                latentPtr.update(from: base, count: latentDim)
+            }
+        }
     }
+
 }
 
 // MARK: - Seeded Random

@@ -131,10 +131,12 @@ extension PocketTtsSynthesizer {
     ) async throws -> KVCacheState {
         var state = state
         let dim = PocketTtsConstants.embeddingDim
+        let token = try createConditioningToken(dim: dim)
 
         let voiceTokenCount = voiceData.promptLength
         for tokenIdx in 0..<voiceTokenCount {
-            let token = try createConditioningToken(
+            fillConditioningToken(
+                token,
                 from: voiceData.audioPrompt,
                 offset: tokenIdx * dim,
                 dim: dim
@@ -146,21 +148,37 @@ extension PocketTtsSynthesizer {
         return state
     }
 
-    /// Prefill a KV cache state with text embedding tokens.
+    /// Prefill a KV cache state with text tokens.
     ///
-    /// Processes all text embeddings, writing K/V projections into the cache
-    /// starting at the current position.
+    /// Looks up each token embedding directly from the shared embedding table
+    /// into one reusable CoreML input buffer, avoiding a transient `[[Float]]`
+    /// allocation per chunk and an `MLMultiArray` allocation per token.
     static func prefillKVCacheText(
         state: KVCacheState,
-        textEmbeddings: [[Float]],
+        tokenIds: [Int],
+        constants: PocketTtsConstantsBundle,
         model: MLModel,
         layerKeys: PocketTtsLayerKeys
     ) async throws -> KVCacheState {
         var state = state
         let dim = PocketTtsConstants.embeddingDim
+        let vocabSize = constants.textEmbedTable.count / dim
+        let token = try createConditioningToken(dim: dim)
 
-        for embedding in textEmbeddings {
-            let token = try createConditioningToken(from: embedding, offset: 0, dim: dim)
+        for tokenId in tokenIds {
+            let clampedId: Int
+            if tokenId >= 0, tokenId < vocabSize {
+                clampedId = tokenId
+            } else {
+                logger.warning("Token ID \(tokenId) out of range [0, \(vocabSize)), clamping")
+                clampedId = min(max(tokenId, 0), vocabSize - 1)
+            }
+            fillConditioningToken(
+                token,
+                from: constants.textEmbedTable,
+                offset: clampedId * dim,
+                dim: dim
+            )
             try await runCondStep(
                 conditioning: token, state: &state, model: model, layerKeys: layerKeys)
         }
@@ -258,7 +276,8 @@ extension PocketTtsSynthesizer {
     /// Text prefill runs identically in both cases.
     static func prefillKVCache(
         voiceData: PocketTtsVoiceData,
-        textEmbeddings: [[Float]],
+        tokenIds: [Int],
+        constants: PocketTtsConstantsBundle,
         model: MLModel,
         layerKeys: PocketTtsLayerKeys
     ) async throws -> KVCacheState {
@@ -272,7 +291,8 @@ extension PocketTtsSynthesizer {
             )
         }
         state = try await prefillKVCacheText(
-            state: state, textEmbeddings: textEmbeddings, model: model, layerKeys: layerKeys
+            state: state, tokenIds: tokenIds, constants: constants, model: model,
+            layerKeys: layerKeys
         )
 
         let finalPos = state.positions[0][0].floatValue
@@ -284,17 +304,21 @@ extension PocketTtsSynthesizer {
     /// Create a `[1, 1, 1024]` MLMultiArray from a float slice.
     ///
     /// Shape: batch=1, sequence_length=1 (one token at a time), embedding_dim=1024.
-    private static func createConditioningToken(
-        from source: [Float], offset: Int, dim: Int
-    ) throws -> MLMultiArray {
-        let array = try MLMultiArray(
-            shape: [1, 1, NSNumber(value: dim)], dataType: .float32)
+    private static func createConditioningToken(dim: Int) throws -> MLMultiArray {
+        try MLMultiArray(shape: [1, 1, NSNumber(value: dim)], dataType: .float32)
+    }
+
+    private static func fillConditioningToken(
+        _ array: MLMultiArray,
+        from source: [Float],
+        offset: Int,
+        dim: Int
+    ) {
         let ptr = array.dataPointer.bindMemory(to: Float.self, capacity: dim)
         source.withUnsafeBufferPointer { buffer in
             guard let base = buffer.baseAddress else { return }
             ptr.update(from: base.advanced(by: offset), count: dim)
         }
-        return array
     }
 
     /// Run the generation step model, returning transformer output and EOS logit.
