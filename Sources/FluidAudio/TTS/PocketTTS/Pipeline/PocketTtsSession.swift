@@ -189,7 +189,13 @@ public actor PocketTtsSession {
         // Generation loop
         let maxGenLen = PocketTtsSynthesizer.estimateMaxFrames(text: text)
         var eosStep: Int?
-        var sequence = try PocketTtsSynthesizer.createNaNSequence()
+        let sequence = try PocketTtsSynthesizer.SequenceScratch()
+        sequence.writeNaN()
+        let flowLMInputProvider = PocketTtsSynthesizer.FlowLMInputProvider(
+            sequence: sequence.array,
+            bosEmb: bosEmb,
+            layerKeys: flowlmLayerKeys
+        )
         let totalFramesAfterEos = framesAfterEos + PocketTtsConstants.extraFramesAfterDetection
 
         for step in 0..<maxGenLen {
@@ -198,11 +204,10 @@ public actor PocketTtsSession {
             // FlowLM step. `kvState` is function-local (not actor-isolated),
             // so it can be passed `inout` to the async free function directly.
             let (transformerOut, eosLogit) = try await PocketTtsSynthesizer.runFlowLMStep(
-                sequence: sequence,
-                bosEmb: bosEmb,
                 state: &kvState,
                 model: stepModel,
-                layerKeys: flowlmLayerKeys
+                layerKeys: flowlmLayerKeys,
+                inputProvider: flowLMInputProvider
             )
 
             // EOS detection
@@ -248,7 +253,7 @@ public actor PocketTtsSession {
             )
 
             // Autoregressive feedback
-            sequence = try PocketTtsSynthesizer.createSequenceFromLatent(latent)
+            sequence.writeLatent(latent)
         }
     }
 }

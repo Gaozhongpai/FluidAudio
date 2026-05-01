@@ -258,10 +258,10 @@ public actor PocketTtsManager {
         }
 
         let selectedVoice = voice ?? defaultVoice
-        let voiceData = try await modelStore.voiceData(for: selectedVoice)
+        let voiceKVSnapshot = try await modelStore.voiceKVSnapshot(for: selectedVoice)
 
         return try await buildSession(
-            voiceData: voiceData, temperature: temperature, seed: seed
+            voiceKVSnapshot: voiceKVSnapshot, temperature: temperature, seed: seed
         )
     }
 
@@ -296,6 +296,20 @@ public actor PocketTtsManager {
         return try await PocketTtsSynthesizer.withModelStore(modelStore) {
             try await PocketTtsSynthesizer.makeSession(
                 voiceData: voiceData,
+                temperature: temperature,
+                seed: seed
+            )
+        }
+    }
+
+    private func buildSession(
+        voiceKVSnapshot: PocketTtsSynthesizer.KVCacheState,
+        temperature: Float,
+        seed: UInt64?
+    ) async throws -> PocketTtsSession {
+        return try await PocketTtsSynthesizer.withModelStore(modelStore) {
+            try await PocketTtsSynthesizer.makeSession(
+                voiceKVSnapshot: voiceKVSnapshot,
                 temperature: temperature,
                 seed: seed
             )

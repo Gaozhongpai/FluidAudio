@@ -8,7 +8,7 @@ extension PocketTtsSynthesizer {
     /// One cache per transformer layer stores the K (key) and V (value) projections
     /// for every processed token. This avoids recomputing K/V for past tokens —
     /// each new step only computes its own K/V, then reads all cached K/V via attention.
-    struct KVCacheState {
+    struct KVCacheState: @unchecked Sendable {
         /// `N` KV cache arrays (one per transformer layer), each shaped
         /// `[2, 1, kvCacheMaxLen, 16, 64]`:
         ///  - `2`: K and V tensors (index 0 = keys, index 1 = values)
@@ -90,18 +90,30 @@ extension PocketTtsSynthesizer {
         model: MLModel,
         layerKeys: PocketTtsLayerKeys
     ) async throws {
+        let inputProvider = CondStepInputProvider(
+            conditioning: conditioning,
+            layerKeys: layerKeys
+        )
+        try await runCondStep(
+            state: &state,
+            model: model,
+            layerKeys: layerKeys,
+            inputProvider: inputProvider
+        )
+    }
+
+    static func runCondStep(
+        state: inout KVCacheState,
+        model: MLModel,
+        layerKeys: PocketTtsLayerKeys,
+        inputProvider: CondStepInputProvider
+    ) async throws {
         let layers = layerKeys.layerCount
-        var inputDict: [String: Any] = [
-            "conditioning": conditioning
-        ]
-
-        for i in 0..<layers {
-            inputDict["cache\(i)"] = state.caches[i]
-            inputDict["position\(i)"] = state.positions[i]
-        }
-
-        let input = try MLDictionaryFeatureProvider(dictionary: inputDict)
-        let output = try await model.compatPrediction(from: input, options: MLPredictionOptions())
+        inputProvider.update(from: state)
+        let output = try await model.compatPrediction(
+            from: inputProvider,
+            options: inputProvider.predictionOptions
+        )
 
         for i in 0..<layers {
             guard let newCache = output.featureValue(for: layerKeys.cacheKeys[i])?.multiArrayValue
@@ -132,6 +144,10 @@ extension PocketTtsSynthesizer {
         var state = state
         let dim = PocketTtsConstants.embeddingDim
         let token = try createConditioningToken(dim: dim)
+        let inputProvider = CondStepInputProvider(
+            conditioning: token,
+            layerKeys: layerKeys
+        )
 
         let voiceTokenCount = voiceData.promptLength
         for tokenIdx in 0..<voiceTokenCount {
@@ -142,7 +158,7 @@ extension PocketTtsSynthesizer {
                 dim: dim
             )
             try await runCondStep(
-                conditioning: token, state: &state, model: model, layerKeys: layerKeys)
+                state: &state, model: model, layerKeys: layerKeys, inputProvider: inputProvider)
         }
 
         return state
@@ -164,6 +180,10 @@ extension PocketTtsSynthesizer {
         let dim = PocketTtsConstants.embeddingDim
         let vocabSize = constants.textEmbedTable.count / dim
         let token = try createConditioningToken(dim: dim)
+        let inputProvider = CondStepInputProvider(
+            conditioning: token,
+            layerKeys: layerKeys
+        )
 
         for tokenId in tokenIds {
             let clampedId: Int
@@ -180,7 +200,7 @@ extension PocketTtsSynthesizer {
                 dim: dim
             )
             try await runCondStep(
-                conditioning: token, state: &state, model: model, layerKeys: layerKeys)
+                state: &state, model: model, layerKeys: layerKeys, inputProvider: inputProvider)
         }
 
         return state
@@ -335,6 +355,25 @@ extension PocketTtsSynthesizer {
         model: MLModel,
         layerKeys: PocketTtsLayerKeys
     ) async throws -> (transformerOut: MLMultiArray, eosLogit: Float) {
+        let inputProvider = FlowLMInputProvider(
+            sequence: sequence,
+            bosEmb: bosEmb,
+            layerKeys: layerKeys
+        )
+        return try await runFlowLMStep(
+            state: &state,
+            model: model,
+            layerKeys: layerKeys,
+            inputProvider: inputProvider
+        )
+    }
+
+    static func runFlowLMStep(
+        state: inout KVCacheState,
+        model: MLModel,
+        layerKeys: PocketTtsLayerKeys,
+        inputProvider: FlowLMInputProvider
+    ) async throws -> (transformerOut: MLMultiArray, eosLogit: Float) {
         guard let transformerKey = layerKeys.transformerOut, let eosKey = layerKeys.eosLogit
         else {
             throw PocketTTSError.processingFailed(
@@ -342,18 +381,11 @@ extension PocketTtsSynthesizer {
         }
 
         let layers = layerKeys.layerCount
-        var inputDict: [String: Any] = [
-            "sequence": sequence,
-            "bos_emb": bosEmb,
-        ]
-
-        for i in 0..<layers {
-            inputDict["cache\(i)"] = state.caches[i]
-            inputDict["position\(i)"] = state.positions[i]
-        }
-
-        let input = try MLDictionaryFeatureProvider(dictionary: inputDict)
-        let output = try await model.compatPrediction(from: input, options: MLPredictionOptions())
+        inputProvider.update(from: state)
+        let output = try await model.compatPrediction(
+            from: inputProvider,
+            options: inputProvider.predictionOptions
+        )
 
         // Extract transformer output
         guard let transformerOut = output.featureValue(for: transformerKey)?.multiArrayValue
@@ -386,5 +418,129 @@ extension PocketTtsSynthesizer {
         }
 
         return (transformerOut: transformerOut, eosLogit: eosLogit)
+    }
+
+    final class FlowLMInputProvider: NSObject, MLFeatureProvider, @unchecked Sendable {
+        let predictionOptions = MLPredictionOptions()
+        private let allFeatureNames: Set<String>
+        private let sequenceFeatureValue: MLFeatureValue
+        private let bosFeatureValue: MLFeatureValue
+        private let cacheFeatureNames: [String]
+        private let positionFeatureNames: [String]
+        private let cacheIndexByName: [String: Int]
+        private let positionIndexByName: [String: Int]
+        private var cacheFeatureValues: [MLFeatureValue?]
+        private var positionFeatureValues: [MLFeatureValue?]
+
+        var featureNames: Set<String> {
+            allFeatureNames
+        }
+
+        init(
+            sequence: MLMultiArray,
+            bosEmb: MLMultiArray,
+            layerKeys: PocketTtsLayerKeys
+        ) {
+            self.sequenceFeatureValue = MLFeatureValue(multiArray: sequence)
+            self.bosFeatureValue = MLFeatureValue(multiArray: bosEmb)
+
+            let layerCount = layerKeys.layerCount
+            self.cacheFeatureNames = (0..<layerCount).map { "cache\($0)" }
+            self.positionFeatureNames = (0..<layerCount).map { "position\($0)" }
+            self.cacheIndexByName = Dictionary(
+                uniqueKeysWithValues: cacheFeatureNames.enumerated().map { ($0.element, $0.offset) }
+            )
+            self.positionIndexByName = Dictionary(
+                uniqueKeysWithValues: positionFeatureNames.enumerated().map { ($0.element, $0.offset) }
+            )
+            self.cacheFeatureValues = Array(repeating: nil, count: layerCount)
+            self.positionFeatureValues = Array(repeating: nil, count: layerCount)
+            self.allFeatureNames = Set(cacheFeatureNames)
+                .union(positionFeatureNames)
+                .union(["sequence", "bos_emb"])
+            super.init()
+        }
+
+        func update(from state: KVCacheState) {
+            for index in state.caches.indices {
+                cacheFeatureValues[index] = MLFeatureValue(multiArray: state.caches[index])
+                positionFeatureValues[index] = MLFeatureValue(multiArray: state.positions[index])
+            }
+        }
+
+        func featureValue(for featureName: String) -> MLFeatureValue? {
+            if featureName == "sequence" {
+                return sequenceFeatureValue
+            }
+            if featureName == "bos_emb" {
+                return bosFeatureValue
+            }
+            if let index = cacheIndexByName[featureName] {
+                return cacheFeatureValues[index]
+            }
+            if let index = positionIndexByName[featureName] {
+                return positionFeatureValues[index]
+            }
+            return nil
+        }
+    }
+
+    final class CondStepInputProvider: NSObject, MLFeatureProvider, @unchecked Sendable {
+        let predictionOptions = MLPredictionOptions()
+        private let allFeatureNames: Set<String>
+        private let conditioningFeatureValue: MLFeatureValue
+        private let cacheFeatureNames: [String]
+        private let positionFeatureNames: [String]
+        private let cacheIndexByName: [String: Int]
+        private let positionIndexByName: [String: Int]
+        private var cacheFeatureValues: [MLFeatureValue?]
+        private var positionFeatureValues: [MLFeatureValue?]
+
+        var featureNames: Set<String> {
+            allFeatureNames
+        }
+
+        init(
+            conditioning: MLMultiArray,
+            layerKeys: PocketTtsLayerKeys
+        ) {
+            self.conditioningFeatureValue = MLFeatureValue(multiArray: conditioning)
+
+            let layerCount = layerKeys.layerCount
+            self.cacheFeatureNames = (0..<layerCount).map { "cache\($0)" }
+            self.positionFeatureNames = (0..<layerCount).map { "position\($0)" }
+            self.cacheIndexByName = Dictionary(
+                uniqueKeysWithValues: cacheFeatureNames.enumerated().map { ($0.element, $0.offset) }
+            )
+            self.positionIndexByName = Dictionary(
+                uniqueKeysWithValues: positionFeatureNames.enumerated().map { ($0.element, $0.offset) }
+            )
+            self.cacheFeatureValues = Array(repeating: nil, count: layerCount)
+            self.positionFeatureValues = Array(repeating: nil, count: layerCount)
+            self.allFeatureNames = Set(cacheFeatureNames)
+                .union(positionFeatureNames)
+                .union(["conditioning"])
+            super.init()
+        }
+
+        func update(from state: KVCacheState) {
+            for index in state.caches.indices {
+                cacheFeatureValues[index] = MLFeatureValue(multiArray: state.caches[index])
+                positionFeatureValues[index] = MLFeatureValue(multiArray: state.positions[index])
+            }
+        }
+
+        func featureValue(for featureName: String) -> MLFeatureValue? {
+            if featureName == "conditioning" {
+                return conditioningFeatureValue
+            }
+            if let index = cacheIndexByName[featureName] {
+                return cacheFeatureValues[index]
+            }
+            if let index = positionIndexByName[featureName] {
+                return positionFeatureValues[index]
+            }
+            return nil
+        }
     }
 }

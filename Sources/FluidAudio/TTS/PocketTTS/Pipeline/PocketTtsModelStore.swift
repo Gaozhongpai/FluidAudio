@@ -20,6 +20,8 @@ public actor PocketTtsModelStore {
     private var mimiEncoderModel: MLModel?
     private var constantsBundle: PocketTtsConstantsBundle?
     private var voiceCache: [String: PocketTtsVoiceData] = [:]
+    private var cachedVoiceKVSnapshot: (voice: String, snapshot: PocketTtsSynthesizer.KVCacheState)?
+    private var mimiInitialStateBlueprint: PocketTtsSynthesizer.MimiState?
     private var languageRootDirectory: URL?
     private var condLayerKeys: PocketTtsLayerKeys?
     private var flowlmLayerKeys: PocketTtsLayerKeys?
@@ -187,6 +189,25 @@ public actor PocketTtsModelStore {
         return keys
     }
 
+    /// Clone an initial Mimi decoder state for an independent synthesis/session.
+    ///
+    /// Loading the blueprint walks the constants directory and allocates the
+    /// decoder's state tensors. Keep one immutable blueprint resident, then
+    /// deep-copy it for each session because Mimi state mutates every frame.
+    func mimiInitialState() throws -> PocketTtsSynthesizer.MimiState {
+        if let mimiInitialStateBlueprint {
+            return try PocketTtsSynthesizer.cloneMimiState(mimiInitialStateBlueprint)
+        }
+
+        let blueprint = try PocketTtsSynthesizer.loadMimiInitialState(
+            from: repoDir(),
+            mimiKeys: mimiDecoderKeys()
+        )
+        mimiInitialStateBlueprint = blueprint
+        logger.info("Cached PocketTTS Mimi initial-state blueprint")
+        return try PocketTtsSynthesizer.cloneMimiState(blueprint)
+    }
+
     /// The language root directory (`<repoDir>/v2/<lang>`) — contains the
     /// four model files, `constants_bin/`, and is the right base for
     /// `loadMimiInitialState`.
@@ -212,6 +233,48 @@ public actor PocketTtsModelStore {
         )
         voiceCache[voice] = data
         return data
+    }
+
+    /// Return a ready-to-clone voice KV blueprint for session creation.
+    ///
+    /// The expanded KV cache is much larger than the compact safetensors voice
+    /// pack, so keep only the most recent voice resident. That matches the
+    /// common app path (one selected voice) without pinning every available
+    /// voice in memory.
+    func voiceKVSnapshot(for voice: String) async throws -> PocketTtsSynthesizer.KVCacheState {
+        let startedAt = Date()
+        if let cachedVoiceKVSnapshot, cachedVoiceKVSnapshot.voice == voice {
+            let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+            logger.info("Reused PocketTTS voice KV blueprint for '\(voice)' in \(elapsedMs)ms")
+            return cachedVoiceKVSnapshot.snapshot
+        }
+
+        let voiceData = try await voiceData(for: voice)
+        let snapshot = try await buildVoiceKVSnapshot(from: voiceData)
+        cachedVoiceKVSnapshot = (voice: voice, snapshot: snapshot)
+        let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+        logger.info("Cached PocketTTS voice KV blueprint for '\(voice)' in \(elapsedMs)ms")
+        return snapshot
+    }
+
+    private func buildVoiceKVSnapshot(
+        from voiceData: PocketTtsVoiceData
+    ) async throws -> PocketTtsSynthesizer.KVCacheState {
+        let layerKeys = try condStepLayerKeys()
+        if let snapshot = voiceData.cacheSnapshot {
+            return try PocketTtsSynthesizer.kvCacheStateFromSnapshot(
+                snapshot,
+                layers: layerKeys.layerCount
+            )
+        }
+
+        let emptyState = try PocketTtsSynthesizer.emptyKVCacheState(layers: layerKeys.layerCount)
+        return try await PocketTtsSynthesizer.prefillKVCacheVoice(
+            state: emptyState,
+            voiceData: voiceData,
+            model: try condStep(),
+            layerKeys: layerKeys
+        )
     }
 
     // MARK: - Voice Cloning

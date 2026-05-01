@@ -214,8 +214,7 @@ public struct PocketTtsSynthesizer {
         let condLayerKeys = try await store.condStepLayerKeys()
         let flowlmLayerKeys = try await store.flowLMStepLayerKeys()
         let mimiKeys = try await store.mimiDecoderKeys()
-        let repoDir = try await store.repoDir()
-        let mimiInitialState = try loadMimiInitialState(from: repoDir, mimiKeys: mimiKeys)
+        let mimiInitialState = try await store.mimiInitialState()
         let bosEmb = try createBosEmbedding(constants.bosEmbedding)
         let seedValue = seed ?? UInt64.random(in: 0...UInt64.max)
         let chunkCount = chunks.count
@@ -258,18 +257,8 @@ public struct PocketTtsSynthesizer {
     ) async throws -> PocketTtsSession {
         let store = try currentModelStore()
 
-        let constants = try await store.constants()
         let condModel = try await store.condStep()
-        let stepModel = try await store.flowlmStep()
-        let flowModel = try await store.flowDecoder()
-        let mimiModel = try await store.mimiDecoder()
         let condLayerKeys = try await store.condStepLayerKeys()
-        let flowlmLayerKeys = try await store.flowLMStepLayerKeys()
-        let mimiKeys = try await store.mimiDecoderKeys()
-        let repoDir = try await store.repoDir()
-        let mimiState = try loadMimiInitialState(from: repoDir, mimiKeys: mimiKeys)
-        let bosEmb = try createBosEmbedding(constants.bosEmbedding)
-        let seedValue = seed ?? UInt64.random(in: 0...UInt64.max)
 
         // One-time voice prefill. Two paths matching `prefillKVCache`:
         //  - Shipped voices (cacheSnapshot != nil): drop pre-baked K/V into
@@ -288,6 +277,36 @@ public struct PocketTtsSynthesizer {
                 layerKeys: condLayerKeys
             )
         }
+
+        return try await makeSession(
+            voiceKVSnapshot: voiceKVSnapshot,
+            temperature: temperature,
+            seed: seed
+        )
+    }
+
+    /// Create a persistent session from an already-expanded voice KV blueprint.
+    ///
+    /// Used by `PocketTtsModelStore` for named shipped voices so repeated
+    /// sessions don't re-expand the compact safetensors voice cache.
+    static func makeSession(
+        voiceKVSnapshot: KVCacheState,
+        temperature: Float = PocketTtsConstants.temperature,
+        seed: UInt64? = nil
+    ) async throws -> PocketTtsSession {
+        let store = try currentModelStore()
+
+        let constants = try await store.constants()
+        let condModel = try await store.condStep()
+        let stepModel = try await store.flowlmStep()
+        let flowModel = try await store.flowDecoder()
+        let mimiModel = try await store.mimiDecoder()
+        let condLayerKeys = try await store.condStepLayerKeys()
+        let flowlmLayerKeys = try await store.flowLMStepLayerKeys()
+        let mimiKeys = try await store.mimiDecoderKeys()
+        let mimiState = try await store.mimiInitialState()
+        let bosEmb = try createBosEmbedding(constants.bosEmbedding)
+        let seedValue = seed ?? UInt64.random(in: 0...UInt64.max)
 
         logger.info(
             "Session voice prefill at position \(Int(voiceKVSnapshot.positions[0][0].floatValue))"
@@ -411,16 +430,15 @@ public struct PocketTtsSynthesizer {
 
         /// FlowLM step with local KV cache copy-in/copy-out.
         private func flowLMStep(
-            sequence: MLMultiArray,
+            inputProvider: FlowLMInputProvider,
             kvState: inout KVCacheState
         ) async throws -> (transformerOut: MLMultiArray, eosLogit: Float) {
             var localState = kvState
             let result = try await PocketTtsSynthesizer.runFlowLMStep(
-                sequence: sequence,
-                bosEmb: bosEmb,
                 state: &localState,
                 model: stepModel,
-                layerKeys: flowlmLayerKeys
+                layerKeys: flowlmLayerKeys,
+                inputProvider: inputProvider
             )
             kvState = localState
             return result
@@ -449,7 +467,13 @@ public struct PocketTtsSynthesizer {
 
                     let maxGenLen = PocketTtsSynthesizer.estimateMaxFrames(text: chunkText)
                     var eosStep: Int?
-                    var sequence = try PocketTtsSynthesizer.createNaNSequence()
+                    let sequence = try PocketTtsSynthesizer.SequenceScratch()
+                    sequence.writeNaN()
+                    let flowLMInputProvider = PocketTtsSynthesizer.FlowLMInputProvider(
+                        sequence: sequence.array,
+                        bosEmb: bosEmb,
+                        layerKeys: flowlmLayerKeys
+                    )
                     let totalFramesAfterEos =
                         framesAfterEos + PocketTtsConstants.extraFramesAfterDetection
 
@@ -457,7 +481,7 @@ public struct PocketTtsSynthesizer {
                         if Task.isCancelled { break }
 
                         let (transformerOut, eosLogit) = try await flowLMStep(
-                            sequence: sequence,
+                            inputProvider: flowLMInputProvider,
                             kvState: &kvState
                         )
 
@@ -485,7 +509,7 @@ public struct PocketTtsSynthesizer {
                                 utteranceIndex: nil
                             ))
 
-                        sequence = try PocketTtsSynthesizer.createSequenceFromLatent(latent)
+                        sequence.writeLatent(latent)
                     }
 
                     if Task.isCancelled { break }
@@ -840,6 +864,34 @@ public struct PocketTtsSynthesizer {
             ptr.update(from: base, count: dim)
         }
         return array
+    }
+
+    final class SequenceScratch: @unchecked Sendable {
+        let array: MLMultiArray
+
+        init() throws {
+            array = try MLMultiArray(
+                shape: [1, 1, NSNumber(value: PocketTtsConstants.latentDim)],
+                dataType: .float32
+            )
+        }
+
+        func writeNaN() {
+            let dim = PocketTtsConstants.latentDim
+            let ptr = array.dataPointer.bindMemory(to: Float.self, capacity: dim)
+            for i in 0..<dim {
+                ptr[i] = .nan
+            }
+        }
+
+        func writeLatent(_ latent: [Float]) {
+            let dim = PocketTtsConstants.latentDim
+            let ptr = array.dataPointer.bindMemory(to: Float.self, capacity: dim)
+            latent.withUnsafeBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return }
+                ptr.update(from: base, count: dim)
+            }
+        }
     }
 
 }
