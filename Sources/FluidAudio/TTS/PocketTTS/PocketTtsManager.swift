@@ -59,7 +59,9 @@ public actor PocketTtsManager {
     public func initialize() async throws {
         try await modelStore.loadIfNeeded()
         isInitialized = true
-        logger.notice("PocketTtsManager initialized")
+        if PocketTtsConstants.detailedTimingLogsEnabled {
+            logger.notice("PocketTtsManager initialized")
+        }
     }
 
     /// Synthesize text to WAV audio data.

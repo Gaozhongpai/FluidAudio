@@ -64,6 +64,27 @@ FlowLM transformer is published in an int8 variant upstream:
 | `flow_decoder` | No | 8-step Euler loop where each step's error feeds the next; small file (37 MB) makes savings marginal anyway |
 | `mimi_decoder` | No | Autoregressive feedback loop where 23 streaming-state tensors carry across frames; errors compound frame-over-frame |
 
+### Why `cond_step.mlmodelc` is large
+
+`cond_step.mlmodelc` is a compiled CoreML transformer prefill model, not a
+small feature extractor. It contains the weights needed to turn voice and text
+conditioning tokens into the FlowLM KV cache. The English 6-layer pack ships it
+only as fp16, so the compiled bundle is about 254 MB on disk.
+
+That on-disk size is not exactly the same as live RAM, because CoreML may
+memory-map weights and may also allocate runtime/GPU buffers lazily. In normal
+speech turns, however, the model must stay available because every new text
+chunk uses `cond_step` for text prefill before audio generation can begin.
+Unloading it between chunks or turns would reduce retained memory but would
+bring back model-load latency and hurt time-to-first-audio.
+
+The extra live memory around `cond_step` also includes KV cache state: for a
+6-layer pack, one full `[2, 1, 512, 16, 64]` Float32 cache per layer is about
+24 MB total. A persistent session keeps a voice KV blueprint and clones it per
+chunk, so active synthesis can temporarily hold more than one KV cache. The
+clone path copies only the populated K/V prefix from the voice blueprint and
+zeros the unused tail, avoiding a full 512-slot memory copy for every chunk.
+
 ## Call Flow
 
 ```
@@ -362,34 +383,3 @@ try await manager.synthesizeToFile(
 
 - **PocketTTS models**: CC-BY-4.0, inherited from [kyutai/pocket-tts](https://huggingface.co/kyutai/pocket-tts)
 - **FluidAudio SDK**: Apache 2.0 licensed (no GPL dependencies)
-
-
-Next best steps, in order:
-
-1. **Device-profile before more surgery**
-   We’ve removed a lot of Swift allocation churn. The next real bottleneck may now be CoreML/GPU compute, not Swift code. Run Instruments on device with:
-   - Allocations
-   - Time Profiler
-   - Metal System Trace if available
-   - VM Tracker
-
-2. **Measure PocketTTS timings in logs**
-   Add lightweight timestamps around:
-   - `makeSession`
-   - first `session.enqueue`
-   - first `session.frames` yield
-   - per-sentence completion
-   - playback start
-
-   This gives practical TTFA numbers without opening Instruments every time.
-
-3. **Coalesce audio frames after first frame**
-   Keep the first 80ms frame immediate, then combine later frames into 160ms or 240ms buffers before scheduling playback. This may reduce `AVAudioPlayerNode.scheduleBuffer` overhead and playback jitter.
-
-4. **Commit current FluidAudio batch**
-   The current changes build and are worthwhile. I’d commit before more invasive changes.
-
-5. **Try direct `AVAudioPCMBuffer` output**
-   Bigger API change: have FluidAudio optionally yield `AVAudioPCMBuffer` or caller-filled buffers instead of `[Float]`. This reduces app-side copies, but it couples FluidAudio to AVFoundation more tightly.
-
-My recommendation: **commit this batch**, then add **timing probes** so we know whether the next bottleneck is session creation, first frame generation, per-frame generation, or playback scheduling.

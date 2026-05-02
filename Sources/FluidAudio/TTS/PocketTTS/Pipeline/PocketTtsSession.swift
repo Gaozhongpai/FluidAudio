@@ -149,8 +149,10 @@ public actor PocketTtsSession {
                 let chunks = PocketTtsSynthesizer.chunkText(
                     trimmed, tokenizer: constants.tokenizer
                 )
-                Self.logger.info(
-                    "Session enqueued '\(trimmed)', \(chunks.count) chunk(s)")
+                if PocketTtsConstants.detailedTimingLogsEnabled {
+                    Self.logger.info(
+                        "Session enqueued '\(trimmed)', \(chunks.count) chunk(s)")
+                }
 
                 for (chunkIndex, chunkText) in chunks.enumerated() {
                     if Task.isCancelled { break }
@@ -184,7 +186,9 @@ public actor PocketTtsSession {
     ) async throws {
         let chunkStart = CFAbsoluteTimeGetCurrent()
         let (normalizedChunk, framesAfterEos) = PocketTtsSynthesizer.normalizeText(text)
-        Self.logger.info("Session chunk \(chunkIndex): '\(normalizedChunk)'")
+        if PocketTtsConstants.detailedTimingLogsEnabled {
+            Self.logger.info("Session chunk \(chunkIndex): '\(normalizedChunk)'")
+        }
 
         // Tokenize; prefill reads embeddings directly from the shared table.
         let tokenIds = constants.tokenizer.encode(normalizedChunk)
@@ -200,9 +204,11 @@ public actor PocketTtsSession {
             layerKeys: condLayerKeys
         )
         let prefillMs = (CFAbsoluteTimeGetCurrent() - prefillStart) * 1000
-        Self.logger.info(
-            "[Timing] chunk=\(chunkIndex) kvClone=\(String(format: "%.1f", cloneMs))ms textPrefill=\(String(format: "%.1f", prefillMs))ms tokens=\(tokenIds.count)"
-        )
+        if PocketTtsConstants.timingLogsEnabled {
+            Self.logger.info(
+                "[Timing] chunk=\(chunkIndex) kvClone=\(String(format: "%.1f", cloneMs))ms textPrefill=\(String(format: "%.1f", prefillMs))ms tokens=\(tokenIds.count)"
+            )
+        }
 
         // Generation loop
         let maxGenLen = PocketTtsSynthesizer.estimateMaxFrames(text: text)
@@ -241,7 +247,9 @@ public actor PocketTtsSession {
             // EOS detection
             if eosLogit > PocketTtsConstants.eosThreshold && eosStep == nil {
                 eosStep = step
-                Self.logger.info("Session chunk \(chunkIndex) EOS at step \(step)")
+                if PocketTtsConstants.detailedTimingLogsEnabled {
+                    Self.logger.info("Session chunk \(chunkIndex) EOS at step \(step)")
+                }
             }
             if let eos = eosStep, step >= eos + totalFramesAfterEos {
                 break
@@ -278,8 +286,9 @@ public actor PocketTtsSession {
             let frameTotalMs = (CFAbsoluteTimeGetCurrent() - frameStart) * 1000
             frameCount += 1
 
-            // Log first few frames and every 10th frame for steady-state
-            if step < 3 || step % 10 == 0 {
+            // Detailed frame timings are useful while profiling, but costly in
+            // DEBUG app runs because AppLogger mirrors each line to stderr.
+            if PocketTtsConstants.detailedTimingLogsEnabled && (step < 3 || step % 10 == 0) {
                 Self.logger.info(
                     "[Timing] chunk=\(chunkIndex) frame=\(step) total=\(String(format: "%.1f", frameTotalMs))ms flowLM=\(String(format: "%.1f", flowLMMs))ms flowDec=\(String(format: "%.1f", flowDecodeMs))ms mimi=\(String(format: "%.1f", mimiMs))ms"
                 )
@@ -288,11 +297,13 @@ public actor PocketTtsSession {
             // TTFA: time-to-first-audio from enqueue
             if isFirstFrame {
                 isFirstFrame = false
-                let ttfaMs = (CFAbsoluteTimeGetCurrent() - enqueueTime) * 1000
-                let sinceSessionMs = (CFAbsoluteTimeGetCurrent() - sessionStartTime) * 1000
-                Self.logger.notice(
-                    "[Timing] TTFA=\(String(format: "%.0f", ttfaMs))ms sinceSessionStart=\(String(format: "%.0f", sinceSessionMs))ms"
-                )
+                if PocketTtsConstants.timingLogsEnabled {
+                    let ttfaMs = (CFAbsoluteTimeGetCurrent() - enqueueTime) * 1000
+                    let sinceSessionMs = (CFAbsoluteTimeGetCurrent() - sessionStartTime) * 1000
+                    Self.logger.notice(
+                        "[Timing] TTFA=\(String(format: "%.0f", ttfaMs))ms sinceSessionStart=\(String(format: "%.0f", sinceSessionMs))ms"
+                    )
+                }
             }
 
             // Yield frame
@@ -317,8 +328,10 @@ public actor PocketTtsSession {
         let avgFlowDec = frameCount > 0 ? flowDecodeTotalMs / Double(frameCount) : 0
         let avgMimi = frameCount > 0 ? mimiTotalMs / Double(frameCount) : 0
         let rtf = frameCount > 0 ? (Double(frameCount) * 0.08) / (chunkMs / 1000) : 0
-        Self.logger.notice(
-            "[Timing] chunk=\(chunkIndex) done frames=\(frameCount) total=\(String(format: "%.0f", chunkMs))ms avg/frame=\(String(format: "%.1f", avgFrameMs))ms (flowLM=\(String(format: "%.1f", avgFlowLM)) flowDec=\(String(format: "%.1f", avgFlowDec)) mimi=\(String(format: "%.1f", avgMimi))) RTFx=\(String(format: "%.2f", rtf))"
-        )
+        if PocketTtsConstants.timingLogsEnabled {
+            Self.logger.notice(
+                "[Timing] chunk=\(chunkIndex) done frames=\(frameCount) total=\(String(format: "%.0f", chunkMs))ms avg/frame=\(String(format: "%.1f", avgFrameMs))ms (flowLM=\(String(format: "%.1f", avgFlowLM)) flowDec=\(String(format: "%.1f", avgFlowDec)) mimi=\(String(format: "%.1f", avgMimi))) RTFx=\(String(format: "%.2f", rtf))"
+            )
+        }
     }
 }

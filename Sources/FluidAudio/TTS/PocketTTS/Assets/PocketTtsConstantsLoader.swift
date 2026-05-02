@@ -100,7 +100,9 @@ public enum PocketTtsConstantsLoader {
             throw LoadError.tokenizerLoadFailed(error.localizedDescription)
         }
 
-        logger.info("Loaded PocketTTS constants from \(directory.lastPathComponent)")
+        if PocketTtsConstants.detailedTimingLogsEnabled {
+            logger.info("Loaded PocketTTS constants from \(directory.lastPathComponent)")
+        }
 
         return PocketTtsConstantsBundle(
             bosEmbedding: bosEmb,
@@ -132,9 +134,11 @@ public enum PocketTtsConstantsLoader {
         }
 
         let snapshot = try loadVoiceSnapshot(from: safetensorsURL, voiceName: sanitized)
-        logger.info(
-            "Loaded PocketTTS voice '\(sanitized)' from safetensors (\(snapshot.layers.count) layers, seq=\(snapshot.cacheSeqLen))"
-        )
+        if PocketTtsConstants.detailedTimingLogsEnabled {
+            logger.info(
+                "Loaded PocketTTS voice '\(sanitized)' from safetensors (\(snapshot.layers.count) layers, seq=\(snapshot.cacheSeqLen))"
+            )
+        }
         return PocketTtsVoiceData(
             audioPrompt: [],
             promptLength: 0,

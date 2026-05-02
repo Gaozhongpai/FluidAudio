@@ -52,10 +52,59 @@ extension PocketTtsSynthesizer {
 
     /// Clone a KV cache state for independent use.
     static func cloneKVCacheState(_ state: KVCacheState) throws -> KVCacheState {
-        KVCacheState(
-            caches: try state.caches.map(deepCopy),
+        let activeSeq = activeKVSequenceLength(in: state)
+        return KVCacheState(
+            caches: try state.caches.map { try cloneKVCacheArray($0, activeSeq: activeSeq) },
             positions: try state.positions.map(deepCopy)
         )
+    }
+
+    private static func activeKVSequenceLength(in state: KVCacheState) -> Int {
+        let maxPosition = state.positions.reduce(0) { partial, position in
+            max(partial, Int(position[0].floatValue.rounded(.up)))
+        }
+        return min(max(maxPosition, 0), PocketTtsConstants.kvCacheMaxLen)
+    }
+
+    private static func cloneKVCacheArray(_ array: MLMultiArray, activeSeq: Int) throws -> MLMultiArray {
+        guard array.dataType == .float32,
+              array.shape.count == 5,
+              array.shape[0].intValue == 2,
+              activeSeq > 0 else {
+            return try deepCopy(array)
+        }
+
+        let seqCapacity = array.shape[2].intValue
+        let heads = array.shape[3].intValue
+        let headDim = array.shape[4].intValue
+        guard seqCapacity > 0, heads > 0, headDim > 0 else {
+            return try deepCopy(array)
+        }
+
+        let copiedSeq = min(activeSeq, seqCapacity)
+        guard copiedSeq < seqCapacity else {
+            return try deepCopy(array)
+        }
+
+        let perSeqFloats = heads * headDim
+        let perKVFloats = seqCapacity * perSeqFloats
+        let copiedFloats = copiedSeq * perSeqFloats
+        let copiedBytes = copiedFloats * MemoryLayout<Float>.size
+        let tailFloats = perKVFloats - copiedFloats
+
+        let copy = try MLMultiArray(shape: array.shape, dataType: array.dataType)
+        let dst = copy.dataPointer.bindMemory(to: Float.self, capacity: copy.count)
+        let src = array.dataPointer.bindMemory(to: Float.self, capacity: array.count)
+
+        memcpy(dst, src, copiedBytes)
+        dst.advanced(by: copiedFloats).initialize(repeating: 0, count: tailFloats)
+
+        memcpy(dst.advanced(by: perKVFloats), src.advanced(by: perKVFloats), copiedBytes)
+        dst.advanced(by: perKVFloats + copiedFloats).initialize(
+            repeating: 0,
+            count: tailFloats
+        )
+        return copy
     }
 
     /// Deep-copy an `MLMultiArray`, preserving shape and dtype.
@@ -316,7 +365,9 @@ extension PocketTtsSynthesizer {
         )
 
         let finalPos = state.positions[0][0].floatValue
-        logger.info("KV cache prefilled to position \(Int(finalPos))")
+        if PocketTtsConstants.detailedTimingLogsEnabled {
+            logger.info("KV cache prefilled to position \(Int(finalPos))")
+        }
 
         return state
     }

@@ -34,6 +34,15 @@ public enum PocketTtsConstants {
     public static let shortTextWordThreshold: Int = 5
     /// Max text tokens per chunk — keeps total KV cache usage under kvCacheMaxLen.
     public static let maxTokensPerChunk: Int = 50
+    /// Enable summary PocketTTS timing logs.
+    ///
+    /// Keep disabled for normal app runs: in DEBUG builds FluidAudio mirrors
+    /// every log line to stderr, so timing logs add scheduler and I/O noise on
+    /// top of CoreML generation.
+    public static let timingLogsEnabled: Bool = false
+
+    /// Enable detailed per-frame/session PocketTTS logs while profiling.
+    public static let detailedTimingLogsEnabled: Bool = false
 
     // MARK: - KV cache
 

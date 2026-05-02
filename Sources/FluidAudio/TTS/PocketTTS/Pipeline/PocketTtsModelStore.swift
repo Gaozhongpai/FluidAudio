@@ -61,9 +61,11 @@ public actor PocketTtsModelStore {
         )
         self.languageRootDirectory = languageRoot
 
-        logger.info(
-            "Loading PocketTTS CoreML models (language=\(self.language.rawValue), precision=\(self.precision))..."
-        )
+        if PocketTtsConstants.timingLogsEnabled {
+            logger.info(
+                "Loading PocketTTS CoreML models (language=\(self.language.rawValue), precision=\(self.precision))..."
+            )
+        }
 
         // Use CPU+GPU for all models to avoid ANE float16 precision loss.
         // The ANE processes in native float16, which causes audible artifacts
@@ -87,7 +89,9 @@ public actor PocketTtsModelStore {
             let modelURL = languageRoot.appendingPathComponent(file)
             let model = try MLModel(contentsOf: modelURL, configuration: config)
             loadedModels.append(model)
-            logger.info("Loaded \(file)")
+            if PocketTtsConstants.detailedTimingLogsEnabled {
+                logger.info("Loaded \(file)")
+            }
         }
 
         condStepModel = loadedModels[0]
@@ -117,11 +121,15 @@ public actor PocketTtsModelStore {
         mimiDecoderKeysCache = try PocketTtsMimiKeys.discover(from: loadedModels[3])
 
         let elapsed = Date().timeIntervalSince(loadStart)
-        logger.info("All PocketTTS models loaded in \(String(format: "%.2f", elapsed))s")
+        if PocketTtsConstants.timingLogsEnabled {
+            logger.info("All PocketTTS models loaded in \(String(format: "%.2f", elapsed))s")
+        }
 
         // Load constants
         constantsBundle = try PocketTtsConstantsLoader.load(from: languageRoot)
-        logger.info("PocketTTS constants loaded")
+        if PocketTtsConstants.detailedTimingLogsEnabled {
+            logger.info("PocketTTS constants loaded")
+        }
     }
 
     /// The conditioning step model (KV cache prefill).
@@ -204,7 +212,9 @@ public actor PocketTtsModelStore {
             mimiKeys: mimiDecoderKeys()
         )
         mimiInitialStateBlueprint = blueprint
-        logger.info("Cached PocketTTS Mimi initial-state blueprint")
+        if PocketTtsConstants.detailedTimingLogsEnabled {
+            logger.info("Cached PocketTTS Mimi initial-state blueprint")
+        }
         return try PocketTtsSynthesizer.cloneMimiState(blueprint)
     }
 
@@ -244,16 +254,20 @@ public actor PocketTtsModelStore {
     func voiceKVSnapshot(for voice: String) async throws -> PocketTtsSynthesizer.KVCacheState {
         let startedAt = Date()
         if let cachedVoiceKVSnapshot, cachedVoiceKVSnapshot.voice == voice {
-            let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
-            logger.info("Reused PocketTTS voice KV blueprint for '\(voice)' in \(elapsedMs)ms")
+            if PocketTtsConstants.timingLogsEnabled {
+                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+                logger.info("Reused PocketTTS voice KV blueprint for '\(voice)' in \(elapsedMs)ms")
+            }
             return cachedVoiceKVSnapshot.snapshot
         }
 
         let voiceData = try await voiceData(for: voice)
         let snapshot = try await buildVoiceKVSnapshot(from: voiceData)
         cachedVoiceKVSnapshot = (voice: voice, snapshot: snapshot)
-        let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
-        logger.info("Cached PocketTTS voice KV blueprint for '\(voice)' in \(elapsedMs)ms")
+        if PocketTtsConstants.timingLogsEnabled {
+            let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+            logger.info("Cached PocketTTS voice KV blueprint for '\(voice)' in \(elapsedMs)ms")
+        }
         return snapshot
     }
 
@@ -293,11 +307,15 @@ public actor PocketTtsModelStore {
         let config = MLModelConfiguration()
         config.computeUnits = .cpuAndGPU
 
-        logger.info("Loading Mimi encoder for voice cloning...")
+        if PocketTtsConstants.timingLogsEnabled {
+            logger.info("Loading Mimi encoder for voice cloning...")
+        }
         let loadStart = Date()
         mimiEncoderModel = try MLModel(contentsOf: modelURL, configuration: config)
         let elapsed = Date().timeIntervalSince(loadStart)
-        logger.info("Mimi encoder loaded in \(String(format: "%.2f", elapsed))s")
+        if PocketTtsConstants.timingLogsEnabled {
+            logger.info("Mimi encoder loaded in \(String(format: "%.2f", elapsed))s")
+        }
     }
 
     /// The Mimi encoder model for voice cloning.

@@ -82,7 +82,9 @@ public struct PocketTtsSynthesizer {
         seed: UInt64? = nil,
         deEss: Bool = true
     ) async throws -> SynthesisResult {
-        logger.info("PocketTTS synthesizing with custom voice: '\(text)'")
+        if PocketTtsConstants.detailedTimingLogsEnabled {
+            logger.info("PocketTTS synthesizing with custom voice: '\(text)'")
+        }
         let genStart = Date()
 
         // Buffer the streaming output. Both APIs share one chunk loop now,
@@ -99,7 +101,9 @@ public struct PocketTtsSynthesizer {
         }
 
         let genElapsed = Date().timeIntervalSince(genStart)
-        logger.info("Generated \(frameCount) frames in \(String(format: "%.2f", genElapsed))s")
+        if PocketTtsConstants.timingLogsEnabled {
+            logger.info("Generated \(frameCount) frames in \(String(format: "%.2f", genElapsed))s")
+        }
 
         // De-essing (no peak normalization — preserve natural levels)
         if deEss {
@@ -118,7 +122,9 @@ public struct PocketTtsSynthesizer {
         )
 
         let duration = Double(allSamples.count) / Double(PocketTtsConstants.audioSampleRate)
-        logger.info("Audio duration: \(String(format: "%.2f", duration))s")
+        if PocketTtsConstants.timingLogsEnabled {
+            logger.info("Audio duration: \(String(format: "%.2f", duration))s")
+        }
 
         return SynthesisResult(
             audio: audioData,
@@ -203,7 +209,9 @@ public struct PocketTtsSynthesizer {
     ) async throws -> AsyncThrowingStream<AudioFrame, Error> {
         let store = try currentModelStore()
 
-        logger.info("PocketTTS streaming synthesis with custom voice: '\(text)'")
+        if PocketTtsConstants.detailedTimingLogsEnabled {
+            logger.info("PocketTTS streaming synthesis with custom voice: '\(text)'")
+        }
 
         let constants = try await store.constants()
         let chunks = chunkText(text, tokenizer: constants.tokenizer)
@@ -281,9 +289,11 @@ public struct PocketTtsSynthesizer {
         }
         let voicePrefillMs = (CFAbsoluteTimeGetCurrent() - voicePrefillStart) * 1000
         let hasSnapshot = voiceData.cacheSnapshot != nil
-        logger.info(
-            "[Timing] makeSession voicePrefill=\(String(format: "%.0f", voicePrefillMs))ms (snapshot=\(hasSnapshot)) layers=\(condLayerKeys.layerCount)"
-        )
+        if PocketTtsConstants.timingLogsEnabled {
+            logger.info(
+                "[Timing] makeSession voicePrefill=\(String(format: "%.0f", voicePrefillMs))ms (snapshot=\(hasSnapshot)) layers=\(condLayerKeys.layerCount)"
+            )
+        }
 
         let session = try await makeSession(
             voiceKVSnapshot: voiceKVSnapshot,
@@ -291,7 +301,9 @@ public struct PocketTtsSynthesizer {
             seed: seed
         )
         let totalMs = (CFAbsoluteTimeGetCurrent() - makeSessionStart) * 1000
-        logger.notice("[Timing] makeSession total=\(String(format: "%.0f", totalMs))ms")
+        if PocketTtsConstants.timingLogsEnabled {
+            logger.notice("[Timing] makeSession total=\(String(format: "%.0f", totalMs))ms")
+        }
         return session
     }
 
@@ -318,9 +330,11 @@ public struct PocketTtsSynthesizer {
         let bosEmb = try createBosEmbedding(constants.bosEmbedding)
         let seedValue = seed ?? UInt64.random(in: 0...UInt64.max)
 
-        logger.info(
-            "Session voice prefill at position \(Int(voiceKVSnapshot.positions[0][0].floatValue))"
-        )
+        if PocketTtsConstants.detailedTimingLogsEnabled {
+            logger.info(
+                "Session voice prefill at position \(Int(voiceKVSnapshot.positions[0][0].floatValue))"
+            )
+        }
 
         let session = try PocketTtsSession(
             voiceKVSnapshot: voiceKVSnapshot,
@@ -461,9 +475,11 @@ public struct PocketTtsSynthesizer {
                 for (chunkIdx, chunkText) in chunks.enumerated() {
                     let (normalizedChunk, framesAfterEos) =
                         PocketTtsSynthesizer.normalizeText(chunkText)
-                    PocketTtsSynthesizer.logger.info(
-                        "Stream chunk \(chunkIdx + 1)/\(chunkCount): '\(normalizedChunk)'"
-                    )
+                    if PocketTtsConstants.detailedTimingLogsEnabled {
+                        PocketTtsSynthesizer.logger.info(
+                            "Stream chunk \(chunkIdx + 1)/\(chunkCount): '\(normalizedChunk)'"
+                        )
+                    }
 
                     let tokenIds = constants.tokenizer.encode(normalizedChunk)
 
@@ -497,8 +513,10 @@ public struct PocketTtsSynthesizer {
 
                         if eosLogit > PocketTtsConstants.eosThreshold && eosStep == nil {
                             eosStep = step
-                            PocketTtsSynthesizer.logger.info(
-                                "Stream chunk \(chunkIdx + 1) EOS at step \(step)")
+                            if PocketTtsConstants.detailedTimingLogsEnabled {
+                                PocketTtsSynthesizer.logger.info(
+                                    "Stream chunk \(chunkIdx + 1) EOS at step \(step)")
+                            }
                         }
                         if let eos = eosStep, step >= eos + totalFramesAfterEos {
                             break
