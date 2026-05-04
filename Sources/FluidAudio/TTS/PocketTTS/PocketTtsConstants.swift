@@ -103,9 +103,10 @@ public enum PocketTtsLanguage: String, Sendable, CaseIterable {
 ///
 /// `fp16` is the upstream default — fp16 weights on disk, ~290 MB for the
 /// FlowLM transformer alone (~767 MB total for the language pack). The
-/// `PocketTtsModelStore` uses `.cpuAndGPU` compute units so CoreML upcasts
-/// activations to fp32 at runtime, matching the Python reference
-/// implementation's numerical fidelity.
+/// default `PocketTtsModelStore` compute units are `.cpuAndGPU`, which keeps
+/// the upstream quality-safe path. Apps may opt into `.all` to evaluate ANE,
+/// but must verify audio parity because ANE can run fp16-heavy paths
+/// differently from the Python reference implementation.
 ///
 /// `int8` replaces only `flowlm_step`'s attention + FFN linear weights with
 /// int8 (per-channel scale tensors stay fp16); `cond_step`, `flow_decoder`,

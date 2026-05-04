@@ -1,3 +1,4 @@
+@preconcurrency import CoreML
 import Foundation
 import OSLog
 
@@ -36,16 +37,20 @@ public actor PocketTtsManager {
     ///     matching upstream's on-disk weight format). `.int8` swaps
     ///     `flowlm_step` for the upstream `flowlm_stepv2` int8-quantized
     ///     variant per kyutai-labs/pocket-tts#147.
+    ///   - computeUnits: CoreML compute units used for all PocketTTS
+    ///     submodels. Defaults to `.cpuAndGPU`; pass `.all` to evaluate ANE.
     public init(
         defaultVoice: String = PocketTtsConstants.defaultVoice,
         language: PocketTtsLanguage = .english,
         directory: URL? = nil,
-        precision: PocketTtsPrecision = .fp16
+        precision: PocketTtsPrecision = .fp16,
+        computeUnits: MLComputeUnits = .cpuAndGPU
     ) {
         self.modelStore = PocketTtsModelStore(
             language: language,
             directory: directory,
-            precision: precision
+            precision: precision,
+            computeUnits: computeUnits
         )
         self.defaultVoice = defaultVoice
         self.language = language

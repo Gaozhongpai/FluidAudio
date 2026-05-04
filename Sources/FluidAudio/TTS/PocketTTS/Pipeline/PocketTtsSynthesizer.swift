@@ -452,6 +452,39 @@ public struct PocketTtsSynthesizer {
             return result
         }
 
+        private struct PendingMimiFrame {
+            let frameIndex: Int
+            let task: Task<[Float], Error>
+        }
+
+        private func startMimiDecodeTask(
+            latent: [Float],
+            frameIndex: Int
+        ) -> PendingMimiFrame {
+            PendingMimiFrame(
+                frameIndex: frameIndex,
+                task: Task {
+                    try await self.mimiDecodeStep(latent: latent)
+                }
+            )
+        }
+
+        private func yieldPendingMimiFrame(
+            _ pending: PendingMimiFrame,
+            continuation: AsyncThrowingStream<AudioFrame, Error>.Continuation,
+            chunkIndex: Int
+        ) async throws {
+            let samples = try await pending.task.value
+            continuation.yield(
+                AudioFrame(
+                    samples: samples,
+                    frameIndex: pending.frameIndex,
+                    chunkIndex: chunkIndex,
+                    chunkCount: chunkCount,
+                    utteranceIndex: nil
+                ))
+        }
+
         /// FlowLM step with local KV cache copy-in/copy-out.
         private func flowLMStep(
             inputProvider: FlowLMInputProvider,
@@ -500,6 +533,8 @@ public struct PocketTtsSynthesizer {
                         bosEmb: bosEmb,
                         layerKeys: flowlmLayerKeys
                     )
+                    var hasYieldedFirstFrame = false
+                    var pendingMimiFrame: PendingMimiFrame?
                     let totalFramesAfterEos =
                         framesAfterEos + PocketTtsConstants.extraFramesAfterDetection
 
@@ -526,18 +561,46 @@ public struct PocketTtsSynthesizer {
                             transformerOut: transformerOut
                         )
 
-                        let frameSamples = try await mimiDecodeStep(latent: latent)
-
-                        continuation.yield(
-                            AudioFrame(
-                                samples: frameSamples,
-                                frameIndex: step,
-                                chunkIndex: chunkIdx,
-                                chunkCount: chunkCount,
-                                utteranceIndex: nil
-                            ))
-
                         sequence.writeLatent(latent)
+
+                        if hasYieldedFirstFrame {
+                            if let pending = pendingMimiFrame {
+                                try await yieldPendingMimiFrame(
+                                    pending,
+                                    continuation: continuation,
+                                    chunkIndex: chunkIdx
+                                )
+                                pendingMimiFrame = nil
+                            }
+                            pendingMimiFrame = startMimiDecodeTask(
+                                latent: latent,
+                                frameIndex: step
+                            )
+                        } else {
+                            // Preserve TTFA: decode the first frame immediately,
+                            // then pipeline subsequent Mimi frames behind the
+                            // next FlowLM/flow step.
+                            let frameSamples = try await mimiDecodeStep(latent: latent)
+                            continuation.yield(
+                                AudioFrame(
+                                    samples: frameSamples,
+                                    frameIndex: step,
+                                    chunkIndex: chunkIdx,
+                                    chunkCount: chunkCount,
+                                    utteranceIndex: nil
+                                ))
+                            hasYieldedFirstFrame = true
+                        }
+                    }
+
+                    if let pending = pendingMimiFrame, !Task.isCancelled {
+                        try await yieldPendingMimiFrame(
+                            pending,
+                            continuation: continuation,
+                            chunkIndex: chunkIdx
+                        )
+                    } else {
+                        pendingMimiFrame?.task.cancel()
                     }
 
                     if Task.isCancelled { break }

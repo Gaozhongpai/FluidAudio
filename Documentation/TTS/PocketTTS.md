@@ -117,6 +117,8 @@ PocketTtsSynthesizer.synthesize(text:voice:temperature:)
   |     |     |-- quantize()            matmul [32] × [32,512] → [512]
   |     |     |-- runMimiDecoder()      [512] → 1920 audio samples
   |     |     |     updates 23 streaming state tensors
+  |     |     |     first frame decodes immediately; later frames pipeline
+  |     |     |     Mimi decode for frame N behind FlowLM/flow for frame N+1
   |     |     |
   |     |     |-- createSequenceFromLatent()  feed latent back for next frame
   |
@@ -156,10 +158,15 @@ Splitting priority:
 
 ## CoreML Details
 
-- All 4 models loaded with `.cpuAndGPU` compute units (ANE float16 causes artifacts in Mimi state feedback)
+- All 4 models default to `.cpuAndGPU` compute units. MiloFlow can pass
+  `.all` from its app-level `pocketTTSCoreMLComputeUnits` setting to evaluate
+  ANE, but audio parity must be checked because ANE fp16 previously caused
+  artifacts in Mimi state feedback.
 - Models compiled from `.mlpackage` → `.mlmodelc` on first load, cached on disk
 - `PocketTtsModelStore` is an actor — thread-safe access to loaded models
 - Voice data cached per voice name to avoid reloading
+- Streaming generation preserves first-frame latency, then overlaps Mimi decode
+  for the previous frame with FlowLM/flow work for the next frame.
 
 ## Voice Cloning
 

@@ -133,6 +133,41 @@ public actor PocketTtsSession {
 
     // MARK: - Generation Loop
 
+    private struct MimiDecodeResult: Sendable {
+        let samples: [Float]
+        let elapsedMs: Double
+    }
+
+    private struct PendingMimiFrame {
+        let frameIndex: Int
+        let task: Task<MimiDecodeResult, Error>
+    }
+
+    private func mimiDecodeStep(latent: [Float]) async throws -> MimiDecodeResult {
+        let start = CFAbsoluteTimeGetCurrent()
+        var localMimi = mimiState
+        let samples = try await PocketTtsSynthesizer.runMimiDecoder(
+            latent: latent,
+            state: &localMimi,
+            model: mimiModel,
+            mimiKeys: mimiKeys
+        )
+        mimiState = localMimi
+        return MimiDecodeResult(
+            samples: samples,
+            elapsedMs: (CFAbsoluteTimeGetCurrent() - start) * 1000
+        )
+    }
+
+    private func startMimiDecodeTask(latent: [Float], frameIndex: Int) -> PendingMimiFrame {
+        PendingMimiFrame(
+            frameIndex: frameIndex,
+            task: Task {
+                try await self.mimiDecodeStep(latent: latent)
+            }
+        )
+    }
+
     private func generateLoop() async {
         var utteranceIndex = 0
         var isFirstFrame = true
@@ -221,6 +256,8 @@ public actor PocketTtsSession {
             layerKeys: flowlmLayerKeys
         )
         let totalFramesAfterEos = framesAfterEos + PocketTtsConstants.extraFramesAfterDetection
+        var hasYieldedFirstFrameInChunk = false
+        var pendingMimiFrame: PendingMimiFrame?
 
         // Accumulators for per-frame timing summary
         var flowLMTotalMs: Double = 0
@@ -230,8 +267,6 @@ public actor PocketTtsSession {
 
         for step in 0..<maxGenLen {
             if Task.isCancelled { break }
-
-            let frameStart = CFAbsoluteTimeGetCurrent()
 
             // FlowLM step
             let flowLMStart = CFAbsoluteTimeGetCurrent()
@@ -270,55 +305,93 @@ public actor PocketTtsSession {
             let flowDecodeMs = (CFAbsoluteTimeGetCurrent() - flowDecodeStart) * 1000
             flowDecodeTotalMs += flowDecodeMs
 
-            // Mimi decode with actor-isolated state
-            let mimiStart = CFAbsoluteTimeGetCurrent()
-            var localMimi = mimiState
-            let frameSamples = try await PocketTtsSynthesizer.runMimiDecoder(
-                latent: latent,
-                state: &localMimi,
-                model: mimiModel,
-                mimiKeys: mimiKeys
-            )
-            mimiState = localMimi
-            let mimiMs = (CFAbsoluteTimeGetCurrent() - mimiStart) * 1000
-            mimiTotalMs += mimiMs
+            // Autoregressive feedback
+            sequence.writeLatent(latent)
 
-            let frameTotalMs = (CFAbsoluteTimeGetCurrent() - frameStart) * 1000
-            frameCount += 1
+            if hasYieldedFirstFrameInChunk {
+                if let pending = pendingMimiFrame {
+                    let decoded = try await pending.task.value
+                    mimiTotalMs += decoded.elapsedMs
+                    frameCount += 1
 
-            // Detailed frame timings are useful while profiling, but costly in
-            // DEBUG app runs because AppLogger mirrors each line to stderr.
-            if PocketTtsConstants.detailedTimingLogsEnabled && (step < 3 || step % 10 == 0) {
-                Self.logger.info(
-                    "[Timing] chunk=\(chunkIndex) frame=\(step) total=\(String(format: "%.1f", frameTotalMs))ms flowLM=\(String(format: "%.1f", flowLMMs))ms flowDec=\(String(format: "%.1f", flowDecodeMs))ms mimi=\(String(format: "%.1f", mimiMs))ms"
-                )
-            }
+                    if PocketTtsConstants.detailedTimingLogsEnabled
+                        && (pending.frameIndex < 3 || pending.frameIndex % 10 == 0)
+                    {
+                        Self.logger.info(
+                            "[Timing] chunk=\(chunkIndex) frame=\(pending.frameIndex) pipelinedMimi=\(String(format: "%.1f", decoded.elapsedMs))ms"
+                        )
+                    }
 
-            // TTFA: time-to-first-audio from enqueue
-            if isFirstFrame {
-                isFirstFrame = false
-                if PocketTtsConstants.timingLogsEnabled {
-                    let ttfaMs = (CFAbsoluteTimeGetCurrent() - enqueueTime) * 1000
-                    let sinceSessionMs = (CFAbsoluteTimeGetCurrent() - sessionStartTime) * 1000
-                    Self.logger.notice(
-                        "[Timing] TTFA=\(String(format: "%.0f", ttfaMs))ms sinceSessionStart=\(String(format: "%.0f", sinceSessionMs))ms"
+                    frameContinuation.yield(
+                        PocketTtsSynthesizer.AudioFrame(
+                            samples: decoded.samples,
+                            frameIndex: pending.frameIndex,
+                            chunkIndex: chunkIndex,
+                            chunkCount: chunkCount,
+                            utteranceIndex: utteranceIndex
+                        )
+                    )
+                    pendingMimiFrame = nil
+                }
+                pendingMimiFrame = startMimiDecodeTask(latent: latent, frameIndex: step)
+            } else {
+                // Preserve TTFA for each chunk by decoding the first frame
+                // immediately. Subsequent frames are pipelined so Mimi decode
+                // overlaps the next FlowLM/flow step.
+                let frameStart = CFAbsoluteTimeGetCurrent()
+                let decoded = try await mimiDecodeStep(latent: latent)
+                let frameTotalMs = (CFAbsoluteTimeGetCurrent() - frameStart) * 1000
+                mimiTotalMs += decoded.elapsedMs
+                frameCount += 1
+
+                // Detailed frame timings are useful while profiling, but costly in
+                // DEBUG app runs because AppLogger mirrors each line to stderr.
+                if PocketTtsConstants.detailedTimingLogsEnabled && (step < 3 || step % 10 == 0) {
+                    Self.logger.info(
+                        "[Timing] chunk=\(chunkIndex) frame=\(step) firstFrameDecode=\(String(format: "%.1f", frameTotalMs))ms flowLM=\(String(format: "%.1f", flowLMMs))ms flowDec=\(String(format: "%.1f", flowDecodeMs))ms mimi=\(String(format: "%.1f", decoded.elapsedMs))ms"
                     )
                 }
-            }
 
-            // Yield frame
+                // TTFA: time-to-first-audio from enqueue
+                if isFirstFrame {
+                    isFirstFrame = false
+                    if PocketTtsConstants.timingLogsEnabled {
+                        let ttfaMs = (CFAbsoluteTimeGetCurrent() - enqueueTime) * 1000
+                        let sinceSessionMs = (CFAbsoluteTimeGetCurrent() - sessionStartTime) * 1000
+                        Self.logger.notice(
+                            "[Timing] TTFA=\(String(format: "%.0f", ttfaMs))ms sinceSessionStart=\(String(format: "%.0f", sinceSessionMs))ms"
+                        )
+                    }
+                }
+
+                frameContinuation.yield(
+                    PocketTtsSynthesizer.AudioFrame(
+                        samples: decoded.samples,
+                        frameIndex: step,
+                        chunkIndex: chunkIndex,
+                        chunkCount: chunkCount,
+                        utteranceIndex: utteranceIndex
+                    )
+                )
+                hasYieldedFirstFrameInChunk = true
+            }
+        }
+
+        if let pending = pendingMimiFrame, !Task.isCancelled {
+            let decoded = try await pending.task.value
+            mimiTotalMs += decoded.elapsedMs
+            frameCount += 1
             frameContinuation.yield(
                 PocketTtsSynthesizer.AudioFrame(
-                    samples: frameSamples,
-                    frameIndex: step,
+                    samples: decoded.samples,
+                    frameIndex: pending.frameIndex,
                     chunkIndex: chunkIndex,
                     chunkCount: chunkCount,
                     utteranceIndex: utteranceIndex
                 )
             )
-
-            // Autoregressive feedback
-            sequence.writeLatent(latent)
+        } else {
+            pendingMimiFrame?.task.cancel()
         }
 
         // Chunk summary

@@ -29,6 +29,7 @@ public actor PocketTtsModelStore {
     private let directory: URL?
     public let language: PocketTtsLanguage
     public let precision: PocketTtsPrecision
+    public let computeUnits: MLComputeUnits
 
     /// - Parameters:
     ///   - language: Which upstream language pack to load. Defaults to
@@ -40,14 +41,19 @@ public actor PocketTtsModelStore {
     ///     `flowlm_step.mlmodelc` for `flowlm_stepv2.mlmodelc` from the
     ///     same upstream `v2/<lang>/` directory; the other three submodels
     ///     stay at fp16.
+    ///   - computeUnits: CoreML compute units used for all PocketTTS
+    ///     submodels. Defaults to `.cpuAndGPU` for the upstream quality-safe
+    ///     path; apps may pass `.all` to evaluate ANE.
     public init(
         language: PocketTtsLanguage = .english,
         directory: URL? = nil,
-        precision: PocketTtsPrecision = .fp16
+        precision: PocketTtsPrecision = .fp16,
+        computeUnits: MLComputeUnits = .cpuAndGPU
     ) {
         self.language = language
         self.directory = directory
         self.precision = precision
+        self.computeUnits = computeUnits
     }
 
     /// Load all four CoreML models and the constants bundle.
@@ -73,7 +79,7 @@ public actor PocketTtsModelStore {
         // quality in the other models. CPU/GPU compute in float32 matches the
         // Python reference implementation.
         let config = MLModelConfiguration()
-        config.computeUnits = .cpuAndGPU
+        config.computeUnits = computeUnits
 
         let loadStart = Date()
 
@@ -305,7 +311,7 @@ public actor PocketTtsModelStore {
         let modelURL = try await PocketTtsResourceDownloader.ensureMimiEncoder(directory: directory)
 
         let config = MLModelConfiguration()
-        config.computeUnits = .cpuAndGPU
+        config.computeUnits = computeUnits
 
         if PocketTtsConstants.timingLogsEnabled {
             logger.info("Loading Mimi encoder for voice cloning...")
