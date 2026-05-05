@@ -215,9 +215,11 @@ public struct PocketTtsSynthesizer {
 
         let constants = try await store.constants()
         let chunks = chunkText(text, tokenizer: constants.tokenizer)
-        let condModel = try await store.condStep()
+        let condModel = await store.condStepIfAvailable()
+        let sequenceCondStep = await store.condStepSequence()
         let stepModel = try await store.flowlmStep()
-        let flowModel = try await store.flowDecoder()
+        let flowModel = await store.flowDecoderIfAvailable()
+        let fusedFlowDecoder = await store.flowDecoderFused()
         let mimiModel = try await store.mimiDecoder()
         let condLayerKeys = try await store.condStepLayerKeys()
         let flowlmLayerKeys = try await store.flowLMStepLayerKeys()
@@ -226,15 +228,18 @@ public struct PocketTtsSynthesizer {
         let bosEmb = try createBosEmbedding(constants.bosEmbedding)
         let seedValue = seed ?? UInt64.random(in: 0...UInt64.max)
         let chunkCount = chunks.count
-        let flowScratch = try FlowDecoderScratch(model: flowModel)
+        let flowScratch = try flowModel.map { try FlowDecoderScratch(model: $0.model) }
+        let fusedFlowScratch = try fusedFlowDecoder.map { try FlowDecoderFusedScratch(model: $0.model) }
 
         let generator = StreamingGenerator(
             constants: constants,
             voiceData: voiceData,
             chunks: chunks,
             condModel: condModel,
+            sequenceCondStep: sequenceCondStep,
             stepModel: stepModel,
             flowModel: flowModel,
+            fusedFlowDecoder: fusedFlowDecoder,
             mimiModel: mimiModel,
             condLayerKeys: condLayerKeys,
             flowlmLayerKeys: flowlmLayerKeys,
@@ -242,6 +247,7 @@ public struct PocketTtsSynthesizer {
             mimiInitialState: mimiInitialState,
             bosEmb: bosEmb,
             flowScratch: flowScratch,
+            fusedFlowScratch: fusedFlowScratch,
             seedValue: seedValue,
             chunkCount: chunkCount,
             temperature: temperature
@@ -266,7 +272,7 @@ public struct PocketTtsSynthesizer {
         let makeSessionStart = CFAbsoluteTimeGetCurrent()
         let store = try currentModelStore()
 
-        let condModel = try await store.condStep()
+        let condModel = await store.condStepIfAvailable()
         let condLayerKeys = try await store.condStepLayerKeys()
 
         // One-time voice prefill. Two paths matching `prefillKVCache`:
@@ -281,9 +287,14 @@ public struct PocketTtsSynthesizer {
             voiceKVSnapshot = try kvCacheStateFromSnapshot(
                 snapshot, layers: condLayerKeys.layerCount)
         } else {
+            guard let condModel else {
+                throw PocketTTSError.processingFailed(
+                    "PocketTTS cloned voice prefill requires \(ModelNames.PocketTTS.condStepFile); compact packs only support precomputed voice snapshots"
+                )
+            }
             let emptyState = try emptyKVCacheState(layers: condLayerKeys.layerCount)
             voiceKVSnapshot = try await prefillKVCacheVoice(
-                state: emptyState, voiceData: voiceData, model: condModel,
+                state: emptyState, voiceData: voiceData, model: condModel.model,
                 layerKeys: condLayerKeys
             )
         }
@@ -319,9 +330,11 @@ public struct PocketTtsSynthesizer {
         let store = try currentModelStore()
 
         let constants = try await store.constants()
-        let condModel = try await store.condStep()
+        let condModel = await store.condStepIfAvailable()
+        let sequenceCondStep = await store.condStepSequence()
         let stepModel = try await store.flowlmStep()
-        let flowModel = try await store.flowDecoder()
+        let flowModel = await store.flowDecoderIfAvailable()
+        let fusedFlowDecoder = await store.flowDecoderFused()
         let mimiModel = try await store.mimiDecoder()
         let condLayerKeys = try await store.condStepLayerKeys()
         let flowlmLayerKeys = try await store.flowLMStepLayerKeys()
@@ -341,8 +354,10 @@ public struct PocketTtsSynthesizer {
             mimiState: mimiState,
             constants: constants,
             condModel: condModel,
+            sequenceCondStep: sequenceCondStep,
             stepModel: stepModel,
             flowModel: flowModel,
+            fusedFlowDecoder: fusedFlowDecoder,
             mimiModel: mimiModel,
             condLayerKeys: condLayerKeys,
             flowlmLayerKeys: flowlmLayerKeys,
@@ -366,16 +381,19 @@ public struct PocketTtsSynthesizer {
         let constants: PocketTtsConstantsBundle
         let voiceData: PocketTtsVoiceData
         let chunks: [String]
-        let condModel: MLModel
+        let condModel: PocketTtsCondStep?
+        let sequenceCondStep: PocketTtsSequenceCondStep?
         let stepModel: MLModel
-        let flowModel: MLModel
+        let flowModel: PocketTtsSingleFlowDecoder?
+        let fusedFlowDecoder: PocketTtsFusedFlowDecoder?
         let mimiModel: MLModel
         let condLayerKeys: PocketTtsLayerKeys
         let flowlmLayerKeys: PocketTtsLayerKeys
         let mimiKeys: PocketTtsMimiKeys
         var mimiState: MimiState
         let bosEmb: MLMultiArray
-        let flowScratch: FlowDecoderScratch
+        let flowScratch: FlowDecoderScratch?
+        let fusedFlowScratch: FlowDecoderFusedScratch?
         var rng: SeededRNG
         let chunkCount: Int
         let temperature: Float
@@ -384,16 +402,19 @@ public struct PocketTtsSynthesizer {
             constants: PocketTtsConstantsBundle,
             voiceData: PocketTtsVoiceData,
             chunks: [String],
-            condModel: MLModel,
+            condModel: PocketTtsCondStep?,
+            sequenceCondStep: PocketTtsSequenceCondStep?,
             stepModel: MLModel,
-            flowModel: MLModel,
+            flowModel: PocketTtsSingleFlowDecoder?,
+            fusedFlowDecoder: PocketTtsFusedFlowDecoder?,
             mimiModel: MLModel,
             condLayerKeys: PocketTtsLayerKeys,
             flowlmLayerKeys: PocketTtsLayerKeys,
             mimiKeys: PocketTtsMimiKeys,
             mimiInitialState: MimiState,
             bosEmb: MLMultiArray,
-            flowScratch: FlowDecoderScratch,
+            flowScratch: FlowDecoderScratch?,
+            fusedFlowScratch: FlowDecoderFusedScratch?,
             seedValue: UInt64,
             chunkCount: Int,
             temperature: Float
@@ -402,8 +423,10 @@ public struct PocketTtsSynthesizer {
             self.voiceData = voiceData
             self.chunks = chunks
             self.condModel = condModel
+            self.sequenceCondStep = sequenceCondStep
             self.stepModel = stepModel
             self.flowModel = flowModel
+            self.fusedFlowDecoder = fusedFlowDecoder
             self.mimiModel = mimiModel
             self.condLayerKeys = condLayerKeys
             self.flowlmLayerKeys = flowlmLayerKeys
@@ -411,6 +434,7 @@ public struct PocketTtsSynthesizer {
             self.mimiState = mimiInitialState
             self.bosEmb = bosEmb
             self.flowScratch = flowScratch
+            self.fusedFlowScratch = fusedFlowScratch
             self.rng = SeededRNG(seed: seedValue)
             self.chunkCount = chunkCount
             self.temperature = temperature
@@ -429,8 +453,10 @@ public struct PocketTtsSynthesizer {
                 numSteps: PocketTtsConstants.numLsdSteps,
                 temperature: temperature,
                 model: flowModel,
+                fusedDecoder: fusedFlowDecoder,
                 rng: &localRng,
-                scratch: flowScratch
+                scratch: flowScratch,
+                fusedScratch: fusedFlowScratch
             )
             rng = localRng
             return result
@@ -521,7 +547,8 @@ public struct PocketTtsSynthesizer {
                         tokenIds: tokenIds,
                         constants: constants,
                         model: condModel,
-                        layerKeys: condLayerKeys
+                        layerKeys: condLayerKeys,
+                        sequenceCondStep: sequenceCondStep
                     )
 
                     let maxGenLen = PocketTtsSynthesizer.estimateMaxFrames(text: chunkText)

@@ -13,17 +13,21 @@ extension PocketTtsSynthesizer {
         transformerOut: MLMultiArray,
         numSteps: Int,
         temperature: Float,
-        model: MLModel,
+        model: PocketTtsSingleFlowDecoder?,
+        fusedDecoder: PocketTtsFusedFlowDecoder? = nil,
         rng: inout some RandomNumberGenerator
     ) async throws -> [Float] {
-        let scratch = try FlowDecoderScratch(model: model)
+        let scratch = try model.map { try FlowDecoderScratch(model: $0.model) }
+        let fusedScratch = try fusedDecoder.map { try FlowDecoderFusedScratch(model: $0.model) }
         return try await flowDecode(
             transformerOut: transformerOut,
             numSteps: numSteps,
             temperature: temperature,
             model: model,
+            fusedDecoder: fusedDecoder,
             rng: &rng,
-            scratch: scratch
+            scratch: scratch,
+            fusedScratch: fusedScratch
         )
     }
 
@@ -31,9 +35,11 @@ extension PocketTtsSynthesizer {
         transformerOut: MLMultiArray,
         numSteps: Int,
         temperature: Float,
-        model: MLModel,
+        model: PocketTtsSingleFlowDecoder?,
+        fusedDecoder: PocketTtsFusedFlowDecoder? = nil,
         rng: inout some RandomNumberGenerator,
-        scratch: FlowDecoderScratch
+        scratch: FlowDecoderScratch?,
+        fusedScratch: FlowDecoderFusedScratch? = nil
     ) async throws -> [Float] {
         let latentDim = PocketTtsConstants.latentDim
         let dt: Float = 1.0 / Float(numSteps)
@@ -45,6 +51,22 @@ extension PocketTtsSynthesizer {
         for i in 0..<latentDim {
             latent[i] = Float.gaussianRandom(using: &rng) * scale
         }
+
+        if let fusedDecoder, let fusedScratch, numSteps == PocketTtsConstants.numLsdSteps {
+            return try await fusedFlowDecode(
+                transformerOut: transformerOut,
+                initialLatent: latent,
+                model: fusedDecoder.model,
+                scratch: fusedScratch
+            )
+        }
+
+        guard let model, let scratch else {
+            throw PocketTTSError.processingFailed(
+                "PocketTTS flow decoding requires \(ModelNames.PocketTTS.flowDecoderFusedFile) or \(ModelNames.PocketTTS.flowDecoderFile)"
+            )
+        }
+        let flowModel = model.model
 
         scratch.writeTransformerOut(transformerOut)
 
@@ -58,7 +80,7 @@ extension PocketTtsSynthesizer {
                 s: sValue,
                 t: tValue,
                 dt: dt,
-                model: model,
+                model: flowModel,
                 scratch: scratch
             )
         }
@@ -103,6 +125,26 @@ extension PocketTtsSynthesizer {
         for i in 0..<latentDim {
             latent[i] += velocityPtr[i] * dt
         }
+    }
+
+    private static func fusedFlowDecode(
+        transformerOut: MLMultiArray,
+        initialLatent: [Float],
+        model: MLModel,
+        scratch: FlowDecoderFusedScratch
+    ) async throws -> [Float] {
+        scratch.writeTransformerOut(transformerOut)
+        scratch.writeInitialLatent(initialLatent)
+
+        let output = try await model.compatPrediction(
+            from: scratch.inputProvider,
+            options: scratch.predictionOptions
+        )
+
+        guard let latentArray = output.featureValue(for: scratch.latentOutputName)?.multiArrayValue else {
+            throw PocketTTSError.processingFailed("Missing fused flow decoder latent output")
+        }
+        return readFloatArray(from: latentArray, count: PocketTtsConstants.latentDim)
     }
 
     final class FlowDecoderScratch: @unchecked Sendable {
@@ -154,6 +196,63 @@ extension PocketTtsSynthesizer {
                 latentPtr.update(from: base, count: latentDim)
             }
         }
+    }
+
+    final class FlowDecoderFusedScratch: @unchecked Sendable {
+        let transformerFlat: MLMultiArray
+        let initialLatentArray: MLMultiArray
+        let inputProvider: MLDictionaryFeatureProvider
+        let predictionOptions = MLPredictionOptions()
+        let latentOutputName: String
+
+        init(model: MLModel) throws {
+            let transformerDim = PocketTtsConstants.transformerDim
+            let latentDim = PocketTtsConstants.latentDim
+
+            transformerFlat = try MLMultiArray(
+                shape: [1, NSNumber(value: transformerDim)], dataType: .float32)
+            initialLatentArray = try MLMultiArray(
+                shape: [1, NSNumber(value: latentDim)], dataType: .float32)
+
+            inputProvider = try MLDictionaryFeatureProvider(dictionary: [
+                "transformer_out": transformerFlat,
+                "initial_latent": initialLatentArray,
+            ])
+
+            guard let latentOutputName = model.modelDescription.outputDescriptionsByName.keys.first else {
+                throw PocketTTSError.processingFailed("Missing fused flow decoder output name")
+            }
+            self.latentOutputName = latentOutputName
+        }
+
+        func writeTransformerOut(_ transformerOut: MLMultiArray) {
+            let transformerDim = PocketTtsConstants.transformerDim
+            let srcPtr = transformerOut.dataPointer.bindMemory(to: Float.self, capacity: transformerDim)
+            let dstPtr = transformerFlat.dataPointer.bindMemory(to: Float.self, capacity: transformerDim)
+            dstPtr.update(from: srcPtr, count: transformerDim)
+        }
+
+        func writeInitialLatent(_ latent: [Float]) {
+            let latentDim = PocketTtsConstants.latentDim
+            let latentPtr = initialLatentArray.dataPointer.bindMemory(to: Float.self, capacity: latentDim)
+            latent.withUnsafeBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return }
+                latentPtr.update(from: base, count: latentDim)
+            }
+        }
+    }
+
+    private static func readFloatArray(from array: MLMultiArray, count: Int) -> [Float] {
+        if array.dataType == .float16 {
+            let ptr = array.dataPointer.bindMemory(to: UInt16.self, capacity: count)
+            var values = [Float](repeating: 0, count: count)
+            for i in 0..<count {
+                values[i] = Float(Float16(bitPattern: ptr[i]))
+            }
+            return values
+        }
+        let ptr = array.dataPointer.bindMemory(to: Float.self, capacity: count)
+        return Array(UnsafeBufferPointer(start: ptr, count: count))
     }
 
 }

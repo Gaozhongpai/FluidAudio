@@ -88,7 +88,7 @@ public enum PocketTtsLanguage: String, Sendable, CaseIterable {
 
     /// HF subdirectory under the pocket-tts-coreml repo root.
     public var repoSubdirectory: String {
-        "v2/\(rawValue)"
+        "\(ModelRegistry.pocketTtsVersionDirectory)/\(rawValue)"
     }
 }
 

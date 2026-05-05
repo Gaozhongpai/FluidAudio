@@ -163,13 +163,13 @@ struct PocketTtsLayerKeys: Sendable {
     ///
     /// Pattern:
     ///  - `new_cache_<N>_internal_tensor_assign_2` → returns `(N - 1) / 2`
+    ///  - `new_cache_<N>`                          → returns `(N - 1) / 2`
     ///  - `new_cache_internal_tensor_assign_2`     → returns `nil` (sorts last)
+    ///  - `new_cache`                              → returns `nil` (sorts last)
     private static func cacheLayerIndex(from name: String) -> Int? {
-        // Strip the "new_cache_" prefix, then take everything up to the next "_".
         guard name.hasPrefix("new_cache_") else { return nil }
         let after = name.dropFirst("new_cache_".count)
-        guard let underscore = after.firstIndex(of: "_") else { return nil }
-        let head = after[..<underscore]
+        let head = after.prefix(while: \.isNumber)
         guard let raw = Int(head) else { return nil }
         // Cache numbering uses odd numbers (1, 3, 5, ...) so map to 0, 1, 2, ...
         return (raw - 1) / 2

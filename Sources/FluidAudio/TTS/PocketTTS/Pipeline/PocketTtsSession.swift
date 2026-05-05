@@ -54,9 +54,11 @@ public actor PocketTtsSession {
     private var generationTask: Task<Void, Never>?
 
     // Models
-    private let condModel: MLModel
+    private let condModel: PocketTtsCondStep?
+    private let sequenceCondStep: PocketTtsSequenceCondStep?
     private let stepModel: MLModel
-    private let flowModel: MLModel
+    private let flowModel: PocketTtsSingleFlowDecoder?
+    private let fusedFlowDecoder: PocketTtsFusedFlowDecoder?
     private let mimiModel: MLModel
     private let condLayerKeys: PocketTtsLayerKeys
     private let flowlmLayerKeys: PocketTtsLayerKeys
@@ -68,7 +70,8 @@ public actor PocketTtsSession {
     private let bosEmb: MLMultiArray
     private let temperature: Float
     private var mimiState: PocketTtsSynthesizer.MimiState
-    private let flowScratch: PocketTtsSynthesizer.FlowDecoderScratch
+    private let flowScratch: PocketTtsSynthesizer.FlowDecoderScratch?
+    private let fusedFlowScratch: PocketTtsSynthesizer.FlowDecoderFusedScratch?
     private var rng: SeededRNG
 
     // MARK: - Initialization
@@ -80,9 +83,11 @@ public actor PocketTtsSession {
         voiceKVSnapshot: PocketTtsSynthesizer.KVCacheState,
         mimiState: PocketTtsSynthesizer.MimiState,
         constants: PocketTtsConstantsBundle,
-        condModel: MLModel,
+        condModel: PocketTtsCondStep?,
+        sequenceCondStep: PocketTtsSequenceCondStep?,
         stepModel: MLModel,
-        flowModel: MLModel,
+        flowModel: PocketTtsSingleFlowDecoder?,
+        fusedFlowDecoder: PocketTtsFusedFlowDecoder?,
         mimiModel: MLModel,
         condLayerKeys: PocketTtsLayerKeys,
         flowlmLayerKeys: PocketTtsLayerKeys,
@@ -95,15 +100,22 @@ public actor PocketTtsSession {
         self.mimiState = mimiState
         self.constants = constants
         self.condModel = condModel
+        self.sequenceCondStep = sequenceCondStep
         self.stepModel = stepModel
         self.flowModel = flowModel
+        self.fusedFlowDecoder = fusedFlowDecoder
         self.mimiModel = mimiModel
         self.condLayerKeys = condLayerKeys
         self.flowlmLayerKeys = flowlmLayerKeys
         self.mimiKeys = mimiKeys
         self.bosEmb = bosEmb
         self.temperature = temperature
-        self.flowScratch = try PocketTtsSynthesizer.FlowDecoderScratch(model: flowModel)
+        self.flowScratch = try flowModel.map {
+            try PocketTtsSynthesizer.FlowDecoderScratch(model: $0.model)
+        }
+        self.fusedFlowScratch = try fusedFlowDecoder.map {
+            try PocketTtsSynthesizer.FlowDecoderFusedScratch(model: $0.model)
+        }
         self.rng = SeededRNG(seed: seed)
 
         // Text queue channel
@@ -236,7 +248,8 @@ public actor PocketTtsSession {
         let prefillStart = CFAbsoluteTimeGetCurrent()
         kvState = try await PocketTtsSynthesizer.prefillKVCacheText(
             state: kvState, tokenIds: tokenIds, constants: constants, model: condModel,
-            layerKeys: condLayerKeys
+            layerKeys: condLayerKeys,
+            sequenceCondStep: sequenceCondStep
         )
         let prefillMs = (CFAbsoluteTimeGetCurrent() - prefillStart) * 1000
         if PocketTtsConstants.timingLogsEnabled {
@@ -298,8 +311,10 @@ public actor PocketTtsSession {
                 numSteps: PocketTtsConstants.numLsdSteps,
                 temperature: temperature,
                 model: flowModel,
+                fusedDecoder: fusedFlowDecoder,
                 rng: &localRng,
-                scratch: flowScratch
+                scratch: flowScratch,
+                fusedScratch: fusedFlowScratch
             )
             rng = localRng
             let flowDecodeMs = (CFAbsoluteTimeGetCurrent() - flowDecodeStart) * 1000

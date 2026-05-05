@@ -1,6 +1,23 @@
 @preconcurrency import CoreML
 import Foundation
 
+struct PocketTtsCondStep: @unchecked Sendable {
+    let model: MLModel
+}
+
+struct PocketTtsFusedFlowDecoder: @unchecked Sendable {
+    let model: MLModel
+}
+
+struct PocketTtsSingleFlowDecoder: @unchecked Sendable {
+    let model: MLModel
+}
+
+struct PocketTtsSequenceCondStep: @unchecked Sendable {
+    let model: MLModel
+    let layerKeys: PocketTtsLayerKeys
+}
+
 /// Actor-based store for PocketTTS CoreML models and constants.
 ///
 /// Manages loading and storing of the four CoreML models
@@ -14,8 +31,10 @@ public actor PocketTtsModelStore {
     private let logger = AppLogger(subsystem: "com.fluidaudio.tts", category: "PocketTtsModelStore")
 
     private var condStepModel: MLModel?
+    private var condStepSequenceModel: PocketTtsSequenceCondStep?
     private var flowlmStepModel: MLModel?
     private var flowDecoderModel: MLModel?
+    private var flowDecoderFusedModel: PocketTtsFusedFlowDecoder?
     private var mimiDecoderModel: MLModel?
     private var mimiEncoderModel: MLModel?
     private var constantsBundle: PocketTtsConstantsBundle?
@@ -58,7 +77,7 @@ public actor PocketTtsModelStore {
 
     /// Load all four CoreML models and the constants bundle.
     public func loadIfNeeded() async throws {
-        guard condStepModel == nil else { return }
+        guard constantsBundle == nil else { return }
 
         let languageRoot = try await PocketTtsResourceDownloader.ensureModels(
             language: language,
@@ -82,40 +101,98 @@ public actor PocketTtsModelStore {
         config.computeUnits = computeUnits
 
         let loadStart = Date()
+        let compactAccelerated = ModelRegistry.usesCompactPocketTtsPack
 
-        let modelFiles: [String] = [
-            ModelNames.PocketTTS.condStepFile,
-            ModelNames.PocketTTS.flowlmStepFile(precision: precision),
-            ModelNames.PocketTTS.flowDecoderFile,
-            ModelNames.PocketTTS.mimiDecoderFile,
-        ]
+        let modelFiles: [String]
+        if compactAccelerated {
+            modelFiles = [
+                ModelNames.PocketTTS.flowlmStepFile(precision: precision),
+                ModelNames.PocketTTS.mimiDecoderFile,
+            ]
+        } else {
+            modelFiles = [
+                ModelNames.PocketTTS.condStepFile,
+                ModelNames.PocketTTS.flowlmStepFile(precision: precision),
+                ModelNames.PocketTTS.flowDecoderFile,
+                ModelNames.PocketTTS.mimiDecoderFile,
+            ]
+        }
 
-        var loadedModels: [MLModel] = []
+        var loadedModels: [String: MLModel] = [:]
         for file in modelFiles {
             let modelURL = languageRoot.appendingPathComponent(file)
             let model = try MLModel(contentsOf: modelURL, configuration: config)
-            loadedModels.append(model)
+            loadedModels[file] = model
             if PocketTtsConstants.detailedTimingLogsEnabled {
                 logger.info("Loaded \(file)")
             }
         }
 
-        condStepModel = loadedModels[0]
-        flowlmStepModel = loadedModels[1]
-        flowDecoderModel = loadedModels[2]
-        mimiDecoderModel = loadedModels[3]
+        if !compactAccelerated {
+            condStepModel = loadedModels[ModelNames.PocketTTS.condStepFile]
+            flowDecoderModel = loadedModels[ModelNames.PocketTTS.flowDecoderFile]
+        }
+        flowlmStepModel = loadedModels[ModelNames.PocketTTS.flowlmStepFile(precision: precision)]
+        mimiDecoderModel = loadedModels[ModelNames.PocketTTS.mimiDecoderFile]
+
+        let expectedLayers = language.transformerLayers
+        if compactAccelerated {
+            let sequenceURL = languageRoot.appendingPathComponent(
+                ModelNames.PocketTTS.condStepSequenceFile)
+            if FileManager.default.fileExists(atPath: sequenceURL.path) {
+                let model = try MLModel(contentsOf: sequenceURL, configuration: config)
+                let layerKeys = try PocketTtsLayerKeys.discover(
+                    from: model,
+                    kind: .condStep,
+                    expectedLayers: expectedLayers,
+                    modelName: "cond_step_seq"
+                )
+                condStepSequenceModel = PocketTtsSequenceCondStep(
+                    model: model,
+                    layerKeys: layerKeys
+                )
+                condLayerKeys = layerKeys
+                logger.info(
+                    "\(compactAccelerated ? "Using compact" : "Using optional") PocketTTS sequence text prefill: \(ModelNames.PocketTTS.condStepSequenceFile)"
+                )
+            } else {
+                throw PocketTTSError.modelNotFound(
+                    "PocketTTS compact pack missing \(ModelNames.PocketTTS.condStepSequenceFile)"
+                )
+            }
+        }
+
+        if compactAccelerated {
+            let fusedURL = languageRoot.appendingPathComponent(
+                ModelNames.PocketTTS.flowDecoderFusedFile)
+            if FileManager.default.fileExists(atPath: fusedURL.path) {
+                let model = try MLModel(contentsOf: fusedURL, configuration: config)
+                flowDecoderFusedModel = PocketTtsFusedFlowDecoder(model: model)
+                logger.info(
+                    "\(compactAccelerated ? "Using compact" : "Using optional") PocketTTS fused flow decoder: \(ModelNames.PocketTTS.flowDecoderFusedFile)"
+                )
+            } else {
+                throw PocketTTSError.modelNotFound(
+                    "PocketTTS compact pack missing \(ModelNames.PocketTTS.flowDecoderFusedFile)"
+                )
+            }
+        }
 
         // Discover per-model output names. Names differ between 6L and 24L
         // packs because CoreML auto-generates them during tracing.
-        let expectedLayers = language.transformerLayers
-        condLayerKeys = try PocketTtsLayerKeys.discover(
-            from: loadedModels[0],
-            kind: .condStep,
-            expectedLayers: expectedLayers,
-            modelName: "cond_step"
-        )
+        if !compactAccelerated, let condStepModel {
+            condLayerKeys = try PocketTtsLayerKeys.discover(
+                from: condStepModel,
+                kind: .condStep,
+                expectedLayers: expectedLayers,
+                modelName: "cond_step"
+            )
+        }
+        guard let flowlmStepModel else {
+            throw PocketTTSError.modelNotFound("PocketTTS flowlm_step model not loaded")
+        }
         flowlmLayerKeys = try PocketTtsLayerKeys.discover(
-            from: loadedModels[1],
+            from: flowlmStepModel,
             kind: .flowlmStep,
             expectedLayers: expectedLayers,
             modelName: "flowlm_step"
@@ -124,7 +201,10 @@ public actor PocketTtsModelStore {
         // Discover Mimi decoder schema (per-state input→output mapping +
         // audio output name). CoreML auto-generates `var_NNN` output names
         // during conversion so the exact names vary across packs.
-        mimiDecoderKeysCache = try PocketTtsMimiKeys.discover(from: loadedModels[3])
+        guard let mimiDecoderModel else {
+            throw PocketTTSError.modelNotFound("PocketTTS mimi_decoder model not loaded")
+        }
+        mimiDecoderKeysCache = try PocketTtsMimiKeys.discover(from: mimiDecoderModel)
 
         let elapsed = Date().timeIntervalSince(loadStart)
         if PocketTtsConstants.timingLogsEnabled {
@@ -146,6 +226,16 @@ public actor PocketTtsModelStore {
         return model
     }
 
+    /// The conditioning step model, when the configured pack ships it.
+    func condStepIfAvailable() -> PocketTtsCondStep? {
+        condStepModel.map { PocketTtsCondStep(model: $0) }
+    }
+
+    /// The optional sequence conditioning model, if enabled and present.
+    func condStepSequence() -> PocketTtsSequenceCondStep? {
+        condStepSequenceModel
+    }
+
     /// The autoregressive generation step model.
     public func flowlmStep() throws -> MLModel {
         guard let model = flowlmStepModel else {
@@ -160,6 +250,16 @@ public actor PocketTtsModelStore {
             throw PocketTTSError.modelNotFound("PocketTTS flow_decoder model not loaded")
         }
         return model
+    }
+
+    /// The single-step LSD flow decoder model, when the configured pack ships it.
+    func flowDecoderIfAvailable() -> PocketTtsSingleFlowDecoder? {
+        flowDecoderModel.map { PocketTtsSingleFlowDecoder(model: $0) }
+    }
+
+    /// The optional fused LSD flow decoder model, if enabled and present.
+    func flowDecoderFused() -> PocketTtsFusedFlowDecoder? {
+        flowDecoderFusedModel
     }
 
     /// The Mimi streaming audio decoder model.

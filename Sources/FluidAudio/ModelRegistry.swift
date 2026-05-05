@@ -25,6 +25,8 @@ public enum ModelRegistry {
     // Mutable static for runtime configuration. nonisolated(unsafe) because it's
     // typically set once at startup before any concurrent access.
     nonisolated(unsafe) private static var _customBaseURL: String?
+    nonisolated(unsafe) private static var _customPocketTtsRepoPath: String?
+    nonisolated(unsafe) private static var _customPocketTtsVersionDirectory: String?
 
     /// Base registry URL (default: HuggingFace)
     /// Can be overridden programmatically to use a different model registry or mirror.
@@ -39,6 +41,43 @@ public enum ModelRegistry {
         set {
             _customBaseURL = newValue
         }
+    }
+
+    /// HuggingFace repo path for PocketTTS CoreML packs.
+    ///
+    /// Defaults to `FluidInference/pocket-tts-coreml`. Set this before
+    /// downloading PocketTTS to use a fork that publishes experimental bundles
+    /// such as `cond_step_seq.mlmodelc` or `flow_decoder_fused.mlmodelc`.
+    public static var pocketTtsRepoPath: String {
+        get {
+            _customPocketTtsRepoPath
+                ?? ProcessInfo.processInfo.environment["POCKET_TTS_COREML_REPO"]
+                ?? "FluidInference/pocket-tts-coreml"
+        }
+        set {
+            _customPocketTtsRepoPath = newValue
+        }
+    }
+
+    /// Top-level directory inside the PocketTTS CoreML repo.
+    ///
+    /// Defaults to upstream `v2`. Apps can set this to a fork-specific
+    /// directory such as `v2_pai` to consume a compact pack that only ships the
+    /// accelerated model set.
+    public static var pocketTtsVersionDirectory: String {
+        get {
+            _customPocketTtsVersionDirectory
+                ?? ProcessInfo.processInfo.environment["POCKET_TTS_COREML_VERSION_DIR"]
+                ?? "v2"
+        }
+        set {
+            _customPocketTtsVersionDirectory = newValue
+        }
+    }
+
+    /// `true` when the configured PocketTTS directory is the compact Pai pack.
+    public static var usesCompactPocketTtsPack: Bool {
+        pocketTtsVersionDirectory == "v2_pai"
     }
 
     // MARK: - URL Construction

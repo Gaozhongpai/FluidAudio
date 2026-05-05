@@ -222,9 +222,27 @@ extension PocketTtsSynthesizer {
         state: KVCacheState,
         tokenIds: [Int],
         constants: PocketTtsConstantsBundle,
-        model: MLModel,
-        layerKeys: PocketTtsLayerKeys
+        model: PocketTtsCondStep?,
+        layerKeys: PocketTtsLayerKeys,
+        sequenceCondStep: PocketTtsSequenceCondStep? = nil
     ) async throws -> KVCacheState {
+        if let sequenceCondStep, !tokenIds.isEmpty,
+           tokenIds.count <= PocketTtsConstants.maxTokensPerChunk {
+            return try await prefillKVCacheTextSequence(
+                state: state,
+                tokenIds: tokenIds,
+                constants: constants,
+                sequenceCondStep: sequenceCondStep
+            )
+        }
+
+        guard let model else {
+            throw PocketTTSError.processingFailed(
+                "PocketTTS text prefill requires \(ModelNames.PocketTTS.condStepFile) when \(ModelNames.PocketTTS.condStepSequenceFile) is unavailable or the chunk is too long"
+            )
+        }
+        let condModel = model.model
+
         var state = state
         let dim = PocketTtsConstants.embeddingDim
         let vocabSize = constants.textEmbedTable.count / dim
@@ -249,7 +267,81 @@ extension PocketTtsSynthesizer {
                 dim: dim
             )
             try await runCondStep(
-                state: &state, model: model, layerKeys: layerKeys, inputProvider: inputProvider)
+                state: &state, model: condModel, layerKeys: layerKeys, inputProvider: inputProvider)
+        }
+
+        return state
+    }
+
+    /// Prefill text tokens using the optional fixed-size sequence model.
+    ///
+    /// The model accepts up to `maxTokensPerChunk` embeddings and advances the
+    /// KV cache positions by the actual token count, preserving the single-token
+    /// `cond_step` path as fallback.
+    private static func prefillKVCacheTextSequence(
+        state: KVCacheState,
+        tokenIds: [Int],
+        constants: PocketTtsConstantsBundle,
+        sequenceCondStep: PocketTtsSequenceCondStep
+    ) async throws -> KVCacheState {
+        var state = state
+        let dim = PocketTtsConstants.embeddingDim
+        let vocabSize = constants.textEmbedTable.count / dim
+        let tokenCount = tokenIds.count
+        let sequence = try createConditioningSequence(
+            maxTokens: PocketTtsConstants.maxTokensPerChunk,
+            dim: dim
+        )
+        let tokenCountArray = try MLMultiArray(shape: [1], dataType: .float32)
+        tokenCountArray[0] = NSNumber(value: Float(tokenCount))
+
+        let sequencePtr = sequence.dataPointer.bindMemory(
+            to: Float.self,
+            capacity: PocketTtsConstants.maxTokensPerChunk * dim
+        )
+        sequencePtr.initialize(repeating: 0, count: PocketTtsConstants.maxTokensPerChunk * dim)
+
+        for (index, tokenId) in tokenIds.enumerated() {
+            let clampedId: Int
+            if tokenId >= 0, tokenId < vocabSize {
+                clampedId = tokenId
+            } else {
+                logger.warning("Token ID \(tokenId) out of range [0, \(vocabSize)), clamping")
+                clampedId = min(max(tokenId, 0), vocabSize - 1)
+            }
+            constants.textEmbedTable.withUnsafeBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return }
+                sequencePtr.advanced(by: index * dim)
+                    .update(from: base.advanced(by: clampedId * dim), count: dim)
+            }
+        }
+
+        let inputProvider = CondStepSequenceInputProvider(
+            conditioningSequence: sequence,
+            tokenCount: tokenCountArray,
+            layerKeys: sequenceCondStep.layerKeys
+        )
+        inputProvider.update(from: state)
+        let output = try await sequenceCondStep.model.compatPrediction(
+            from: inputProvider,
+            options: inputProvider.predictionOptions
+        )
+
+        for i in 0..<sequenceCondStep.layerKeys.layerCount {
+            guard let newCache = output.featureValue(
+                for: sequenceCondStep.layerKeys.cacheKeys[i]
+            )?.multiArrayValue else {
+                throw PocketTTSError.processingFailed(
+                    "Missing cond_step_seq cache output: \(sequenceCondStep.layerKeys.cacheKeys[i])")
+            }
+            guard let newPos = output.featureValue(
+                for: sequenceCondStep.layerKeys.positionKeys[i]
+            )?.multiArrayValue else {
+                throw PocketTTSError.processingFailed(
+                    "Missing cond_step_seq position output: \(sequenceCondStep.layerKeys.positionKeys[i])")
+            }
+            state.caches[i] = newCache
+            state.positions[i] = newPos
         }
 
         return state
@@ -347,21 +439,28 @@ extension PocketTtsSynthesizer {
         voiceData: PocketTtsVoiceData,
         tokenIds: [Int],
         constants: PocketTtsConstantsBundle,
-        model: MLModel,
-        layerKeys: PocketTtsLayerKeys
+        model: PocketTtsCondStep?,
+        layerKeys: PocketTtsLayerKeys,
+        sequenceCondStep: PocketTtsSequenceCondStep? = nil
     ) async throws -> KVCacheState {
         var state: KVCacheState
         if let snapshot = voiceData.cacheSnapshot {
             state = try kvCacheStateFromSnapshot(snapshot, layers: layerKeys.layerCount)
         } else {
+            guard let model else {
+                throw PocketTTSError.processingFailed(
+                    "PocketTTS cloned voice prefill requires \(ModelNames.PocketTTS.condStepFile); compact packs only support precomputed voice snapshots"
+                )
+            }
             let emptyState = try emptyKVCacheState(layers: layerKeys.layerCount)
             state = try await prefillKVCacheVoice(
-                state: emptyState, voiceData: voiceData, model: model, layerKeys: layerKeys
+                state: emptyState, voiceData: voiceData, model: model.model, layerKeys: layerKeys
             )
         }
         state = try await prefillKVCacheText(
             state: state, tokenIds: tokenIds, constants: constants, model: model,
-            layerKeys: layerKeys
+            layerKeys: layerKeys,
+            sequenceCondStep: sequenceCondStep
         )
 
         let finalPos = state.positions[0][0].floatValue
@@ -377,6 +476,13 @@ extension PocketTtsSynthesizer {
     /// Shape: batch=1, sequence_length=1 (one token at a time), embedding_dim=1024.
     private static func createConditioningToken(dim: Int) throws -> MLMultiArray {
         try MLMultiArray(shape: [1, 1, NSNumber(value: dim)], dataType: .float32)
+    }
+
+    private static func createConditioningSequence(maxTokens: Int, dim: Int) throws -> MLMultiArray {
+        try MLMultiArray(
+            shape: [1, NSNumber(value: maxTokens), NSNumber(value: dim)],
+            dataType: .float32
+        )
     }
 
     private static func fillConditioningToken(
@@ -584,6 +690,71 @@ extension PocketTtsSynthesizer {
         func featureValue(for featureName: String) -> MLFeatureValue? {
             if featureName == "conditioning" {
                 return conditioningFeatureValue
+            }
+            if let index = cacheIndexByName[featureName] {
+                return cacheFeatureValues[index]
+            }
+            if let index = positionIndexByName[featureName] {
+                return positionFeatureValues[index]
+            }
+            return nil
+        }
+    }
+
+    final class CondStepSequenceInputProvider: NSObject, MLFeatureProvider, @unchecked Sendable {
+        let predictionOptions = MLPredictionOptions()
+        private let allFeatureNames: Set<String>
+        private let conditioningSequenceFeatureValue: MLFeatureValue
+        private let tokenCountFeatureValue: MLFeatureValue
+        private let cacheFeatureNames: [String]
+        private let positionFeatureNames: [String]
+        private let cacheIndexByName: [String: Int]
+        private let positionIndexByName: [String: Int]
+        private var cacheFeatureValues: [MLFeatureValue?]
+        private var positionFeatureValues: [MLFeatureValue?]
+
+        var featureNames: Set<String> {
+            allFeatureNames
+        }
+
+        init(
+            conditioningSequence: MLMultiArray,
+            tokenCount: MLMultiArray,
+            layerKeys: PocketTtsLayerKeys
+        ) {
+            self.conditioningSequenceFeatureValue = MLFeatureValue(multiArray: conditioningSequence)
+            self.tokenCountFeatureValue = MLFeatureValue(multiArray: tokenCount)
+
+            let layerCount = layerKeys.layerCount
+            self.cacheFeatureNames = (0..<layerCount).map { "cache\($0)" }
+            self.positionFeatureNames = (0..<layerCount).map { "position\($0)" }
+            self.cacheIndexByName = Dictionary(
+                uniqueKeysWithValues: cacheFeatureNames.enumerated().map { ($0.element, $0.offset) }
+            )
+            self.positionIndexByName = Dictionary(
+                uniqueKeysWithValues: positionFeatureNames.enumerated().map { ($0.element, $0.offset) }
+            )
+            self.cacheFeatureValues = Array(repeating: nil, count: layerCount)
+            self.positionFeatureValues = Array(repeating: nil, count: layerCount)
+            self.allFeatureNames = Set(cacheFeatureNames)
+                .union(positionFeatureNames)
+                .union(["conditioning_sequence", "token_count"])
+            super.init()
+        }
+
+        func update(from state: KVCacheState) {
+            for index in state.caches.indices {
+                cacheFeatureValues[index] = MLFeatureValue(multiArray: state.caches[index])
+                positionFeatureValues[index] = MLFeatureValue(multiArray: state.positions[index])
+            }
+        }
+
+        func featureValue(for featureName: String) -> MLFeatureValue? {
+            if featureName == "conditioning_sequence" {
+                return conditioningSequenceFeatureValue
+            }
+            if featureName == "token_count" {
+                return tokenCountFeatureValue
             }
             if let index = cacheIndexByName[featureName] {
                 return cacheFeatureValues[index]

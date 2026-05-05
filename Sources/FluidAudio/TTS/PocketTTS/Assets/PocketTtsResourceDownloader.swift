@@ -6,7 +6,7 @@ public enum PocketTtsResourceDownloader {
     private static let logger = AppLogger(category: "PocketTtsResourceDownloader")
 
     /// Ensure all PocketTTS models for the given language are downloaded and
-    /// return the **language root** directory (`<repoDir>/v2/<lang>/`).
+    /// return the **language root** directory (`<repoDir>/<version>/<lang>/`).
     ///
     /// - Parameters:
     ///   - language: Which upstream language pack to fetch.
@@ -42,7 +42,11 @@ public enum PocketTtsResourceDownloader {
         let subdir = language.repoSubdirectory
         let languageRoot = repoDir.appendingPathComponent(subdir)
 
-        let required = ModelNames.PocketTTS.requiredModels(precision: precision)
+        let compactAccelerated = ModelRegistry.usesCompactPocketTtsPack
+        let required = ModelNames.PocketTTS.requiredModels(
+            precision: precision,
+            compactAccelerated: compactAccelerated
+        )
         let allPresent = required.allSatisfy { model in
             FileManager.default.fileExists(
                 atPath: languageRoot.appendingPathComponent(model).path)
@@ -64,9 +68,12 @@ public enum PocketTtsResourceDownloader {
             progressHandler: progressHandler
         )
 
-        // The HF subdir contains both FlowLM precisions; delete the one we
-        // don't need so disk usage matches the loaded models.
-        removeUnusedFlowlmVariant(at: languageRoot, keeping: precision)
+        // The upstream HF subdir contains both FlowLM precisions; delete the
+        // one we don't need so disk usage matches the loaded models. Compact
+        // packs only publish the requested model set.
+        if !compactAccelerated {
+            removeUnusedFlowlmVariant(at: languageRoot, keeping: precision)
+        }
 
         return languageRoot
     }

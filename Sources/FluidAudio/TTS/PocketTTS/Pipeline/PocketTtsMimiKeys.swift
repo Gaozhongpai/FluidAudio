@@ -97,6 +97,15 @@ struct PocketTtsMimiKeys: Sendable {
         }
         for key in outputsByShape.keys {
             outputsByShape[key]?.sort { lhs, rhs in
+                // Scalar Mimi state outputs are ambiguous by shape: attention offsets
+                // and conv `first` flags are all `[1]`. Newer converter wrappers
+                // produce offset tensors as `var_*` and pass-through flag casts as
+                // `cast_*`, so keep offsets ahead of flags before numeric sorting.
+                if key == [1] {
+                    let lRank = lhs.hasPrefix("var_") ? 0 : 1
+                    let rRank = rhs.hasPrefix("var_") ? 0 : 1
+                    if lRank != rRank { return lRank < rRank }
+                }
                 let li = PocketTtsLayerKeys.trailingNumber(in: lhs) ?? Int.max
                 let ri = PocketTtsLayerKeys.trailingNumber(in: rhs) ?? Int.max
                 if li != ri { return li < ri }

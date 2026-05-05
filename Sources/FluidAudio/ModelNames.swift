@@ -125,6 +125,8 @@ public enum Repo: String, CaseIterable, Sendable {
             return "FluidInference/diar-streaming-sortformer-coreml"
         case .lseendAmi, .lseendCallHome, .lseendDihard2, .lseendDihard3:
             return "FluidInference/ls-eend-coreml"
+        case .pocketTts:
+            return ModelRegistry.pocketTtsRepoPath
         case .qwen3Asr, .qwen3AsrInt8:
             return "FluidInference/qwen3-asr-0.6b-coreml"
         case .parakeetTdtCtc110m:
@@ -665,19 +667,23 @@ public enum ModelNames {
     /// PocketTTS model names (flow-matching language model TTS)
     public enum PocketTTS {
         public static let condStep = "cond_step"
+        public static let condStepSequence = "cond_step_seq"
         public static let flowlmStep = "flowlm_step"
         /// int8 variant of the FlowLM transformer published upstream alongside
         /// the default `flowlm_step`. Lives in the same `v2/<lang>/` directory
         /// and gets selected when the caller asks for `.int8` precision.
         public static let flowlmStepV2 = "flowlm_stepv2"
         public static let flowDecoder = "flow_decoder"
+        public static let flowDecoderFused = "flow_decoder_fused"
         public static let mimiDecoder = "mimi_decoder"
         public static let mimiEncoder = "mimi_encoder"
 
         public static let condStepFile = condStep + ".mlmodelc"
+        public static let condStepSequenceFile = condStepSequence + ".mlmodelc"
         public static let flowlmStepFile = flowlmStep + ".mlmodelc"
         public static let flowlmStepV2File = flowlmStepV2 + ".mlmodelc"
         public static let flowDecoderFile = flowDecoder + ".mlmodelc"
+        public static let flowDecoderFusedFile = flowDecoderFused + ".mlmodelc"
         public static let mimiDecoderFile = mimiDecoder + ".mlmodelc"
         public static let mimiEncoderFile = mimiEncoder + ".mlmodelc"
 
@@ -697,8 +703,20 @@ public enum ModelNames {
 
         /// Required files inside any language's `v2/<lang>/` pack for the
         /// given precision. The set differs only in the FlowLM filename.
-        public static func requiredModels(precision: PocketTtsPrecision) -> Set<String> {
-            [
+        public static func requiredModels(
+            precision: PocketTtsPrecision,
+            compactAccelerated: Bool = false
+        ) -> Set<String> {
+            if compactAccelerated {
+                return [
+                    condStepSequenceFile,
+                    flowlmStepFile(precision: precision),
+                    flowDecoderFusedFile,
+                    mimiDecoderFile,
+                    constantsBinDir,
+                ]
+            }
+            return [
                 condStepFile,
                 flowlmStepFile(precision: precision),
                 flowDecoderFile,
