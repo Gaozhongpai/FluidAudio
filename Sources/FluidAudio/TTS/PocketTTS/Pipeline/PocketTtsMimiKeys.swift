@@ -85,11 +85,19 @@ struct PocketTtsMimiKeys: Sendable {
         //    Single pass over outputs: identify pass-throughs by name match
         //    against `stateShapes`, bucket the rest by shape (excluding audio).
         var passThroughMap: [String: String] = [:]
+        var directStateOutputMap: [String: String] = [:]
         var outputsByShape: [[Int]: [String]] = [:]
         for (name, desc) in outputs where name != audio {
             if stateShapes[name] != nil {
                 passThroughMap[name] = name
                 continue
+            }
+            if name.hasSuffix("_out") {
+                let inputName = String(name.dropLast(4))
+                if stateShapes[inputName] != nil {
+                    directStateOutputMap[inputName] = name
+                    continue
+                }
             }
             guard let constraint = desc.multiArrayConstraint else { continue }
             let shape = constraint.shape.map { $0.intValue }
@@ -121,6 +129,10 @@ struct PocketTtsMimiKeys: Sendable {
         var orderedMapping: [(input: String, output: String)] = []
         for inputName in canonicalStateOrder {
             guard let shape = stateShapes[inputName] else { continue }
+            if let directOutput = directStateOutputMap[inputName] {
+                orderedMapping.append((input: inputName, output: directOutput))
+                continue
+            }
             if let passThrough = passThroughMap[inputName] {
                 orderedMapping.append((input: inputName, output: passThrough))
                 continue
