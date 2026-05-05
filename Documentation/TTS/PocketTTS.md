@@ -50,7 +50,7 @@ on HuggingFace; sizes are for the English language pack.
 | `precision: .int8` | 549.3 MB |
 | `precision: .int8` + optional fused flow decoder | 568.6 MB |
 | `precision: .int8` + optional fused flow decoder + sequence text prefill | 701.0 MB |
-| MiloFlow compact `v2_pai/english` pack | 314.0 MB |
+| MiloFlow compact `v2_pai/english` pack | 315.0 MB |
 | **int8 savings vs fp16** | **−217 MB (28%)** |
 
 The `v2/<lang>/` HF directory ships **both** flowlm variants, so a fresh
