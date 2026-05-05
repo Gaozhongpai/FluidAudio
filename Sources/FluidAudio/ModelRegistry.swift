@@ -75,9 +75,9 @@ public enum ModelRegistry {
         }
     }
 
-    /// `true` when the configured PocketTTS directory is the compact Pai pack.
+    /// `true` when the configured PocketTTS directory is a compact Pai pack.
     public static var usesCompactPocketTtsPack: Bool {
-        pocketTtsVersionDirectory == "v2_pai"
+        pocketTtsVersionDirectory.hasPrefix("v2_pai")
     }
 
     // MARK: - URL Construction
