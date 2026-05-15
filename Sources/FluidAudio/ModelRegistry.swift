@@ -27,6 +27,7 @@ public enum ModelRegistry {
     nonisolated(unsafe) private static var _customBaseURL: String?
     nonisolated(unsafe) private static var _customPocketTtsRepoPath: String?
     nonisolated(unsafe) private static var _customPocketTtsVersionDirectory: String?
+    nonisolated(unsafe) private static var _customPocketTtsRevision: String?
 
     /// Base registry URL (default: HuggingFace)
     /// Can be overridden programmatically to use a different model registry or mirror.
@@ -75,6 +76,21 @@ public enum ModelRegistry {
         }
     }
 
+    /// Git revision for PocketTTS CoreML downloads.
+    ///
+    /// Defaults to `main` for upstream FluidAudio behavior. Apps that rely on a
+    /// curated pack can pin this to a commit SHA.
+    public static var pocketTtsRevision: String {
+        get {
+            _customPocketTtsRevision
+                ?? ProcessInfo.processInfo.environment["POCKET_TTS_COREML_REVISION"]
+                ?? "main"
+        }
+        set {
+            _customPocketTtsRevision = newValue
+        }
+    }
+
     /// `true` when the configured PocketTTS directory is a compact Pai pack.
     public static var usesCompactPocketTtsPack: Bool {
         pocketTtsVersionDirectory.hasPrefix("v2_pai")
@@ -93,7 +109,12 @@ public enum ModelRegistry {
 
     /// Construct download URL for a model file
     public static func resolveModel(_ repoPath: String, _ filePath: String) throws -> URL {
-        let urlString = "\(baseURL)/\(repoPath)/resolve/main/\(filePath)"
+        try resolveModel(repoPath, filePath, revision: "main")
+    }
+
+    /// Construct download URL for a model file at a specific revision.
+    public static func resolveModel(_ repoPath: String, _ filePath: String, revision: String) throws -> URL {
+        let urlString = "\(baseURL)/\(repoPath)/resolve/\(revision)/\(filePath)"
         guard let url = URL(string: urlString) else {
             throw Error.invalidURL(urlString)
         }

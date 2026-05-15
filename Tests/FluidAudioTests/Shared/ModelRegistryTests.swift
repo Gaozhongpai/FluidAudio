@@ -99,6 +99,18 @@ final class ModelRegistryTests: XCTestCase {
         XCTAssertEqual(url.absoluteString, expectedPath, "Resolve model URL should use custom registry")
     }
 
+    func testResolveModelURLWithRevision() throws {
+        let repoPath = "FluidInference/pocket-tts-coreml"
+        let filePath = "v2/english/flowlm_stepv2.mlmodelc/coremldata.bin"
+        let revision = "5d26acbe9ef1962840edfa635decdb44d0ed0208"
+
+        let url = try ModelRegistry.resolveModel(repoPath, filePath, revision: revision)
+        let expectedPath =
+            "https://huggingface.co/FluidInference/pocket-tts-coreml/resolve/\(revision)/v2/english/flowlm_stepv2.mlmodelc/coremldata.bin"
+
+        XCTAssertEqual(url.absoluteString, expectedPath, "Resolve model URL should support pinned revisions")
+    }
+
     func testAPIDatasetsURLConstruction() throws {
         let dataset = "FluidInference/librispeech"
         let apiPath = "tree/main"

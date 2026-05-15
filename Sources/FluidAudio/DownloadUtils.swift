@@ -1,4 +1,5 @@
 import CoreML
+import CryptoKit
 import Foundation
 
 /// HuggingFace model downloader using URLSession
@@ -54,6 +55,7 @@ public class DownloadUtils {
         case invalidResponse
         case rateLimited(statusCode: Int, message: String)
         case downloadFailed(path: String, underlying: Error)
+        case integrityCheckFailed(path: String, reason: String)
         case modelNotFound(path: String)
         case htmlErrorResponse(path: String, snippet: String)
 
@@ -65,6 +67,8 @@ public class DownloadUtils {
                 return "Hugging Face rate limit encountered: \(message)"
             case .downloadFailed(let path, let underlying):
                 return "Failed to download \(path): \(underlying.localizedDescription)"
+            case .integrityCheckFailed(let path, let reason):
+                return "Downloaded file failed integrity check for \(path): \(reason)"
             case .htmlErrorResponse(let path, let snippet):
                 return "HuggingFace returned HTML instead of JSON for \(path) (rate limit or server issue): \(snippet)"
             case .modelNotFound(let path):
@@ -101,6 +105,12 @@ public class DownloadUtils {
     /// Called on an unspecified queue. If you need to update UI, dispatch to
     /// the main actor inside your handler.
     public typealias ProgressHandler = @Sendable (DownloadProgress) -> Void
+
+    private struct RemoteFile: Sendable {
+        let path: String
+        let size: Int
+        let sha256: String?
+    }
 
     public struct DownloadConfig: Sendable {
         public let timeout: TimeInterval
@@ -487,6 +497,53 @@ public class DownloadUtils {
 
     // MARK: - Helper Functions
 
+    private static func remoteFile(from item: [String: Any], path: String) -> RemoteFile {
+        let size = item["size"] as? Int ?? -1
+        let sha256 = (item["lfs"] as? [String: Any])?["oid"] as? String
+        return RemoteFile(path: path, size: size, sha256: sha256?.lowercased())
+    }
+
+    private static func validateDownloadedFile(at url: URL, against remoteFile: RemoteFile) throws {
+        let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+        guard resourceValues.isRegularFile == true else {
+            throw HuggingFaceDownloadError.integrityCheckFailed(
+                path: remoteFile.path,
+                reason: "expected a regular file"
+            )
+        }
+
+        let actualSize = resourceValues.fileSize ?? -1
+        if remoteFile.size >= 0, actualSize != remoteFile.size {
+            throw HuggingFaceDownloadError.integrityCheckFailed(
+                path: remoteFile.path,
+                reason: "expected \(remoteFile.size) bytes, got \(actualSize)"
+            )
+        }
+
+        guard let expectedSHA256 = remoteFile.sha256 else { return }
+        let actualSHA256 = try sha256Hex(of: url)
+        guard actualSHA256 == expectedSHA256 else {
+            throw HuggingFaceDownloadError.integrityCheckFailed(
+                path: remoteFile.path,
+                reason: "expected SHA-256 \(expectedSHA256), got \(actualSHA256)"
+            )
+        }
+    }
+
+    private static func sha256Hex(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        var hasher = SHA256()
+        while true {
+            let data = try handle.read(upToCount: 1024 * 1024) ?? Data()
+            if data.isEmpty { break }
+            hasher.update(data: data)
+        }
+
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     /// Robustly create a directory, removing any conflicting files in the path.
     ///
     /// This handles cases where a file exists where a directory should be, which can happen
@@ -573,13 +630,14 @@ public class DownloadUtils {
         _ repo: Repo,
         subdirectory: String,
         to repoDirectory: URL,
+        revision: String = "main",
         progressHandler: ProgressHandler? = nil
     ) async throws {
         progressHandler?(DownloadProgress(fractionCompleted: 0.0, phase: .listing))
-        var filesToDownload: [(path: String, size: Int)] = []
+        var filesToDownload: [RemoteFile] = []
 
         func listFiles(at path: String) async throws {
-            let dirURL = try ModelRegistry.apiModels(repo.remotePath, "tree/main/\(path)")
+            let dirURL = try ModelRegistry.apiModels(repo.remotePath, "tree/\(revision)/\(path)")
             let (dirData, response) = try await fetchWithAuth(from: dirURL)
             if let httpResponse = response as? HTTPURLResponse,
                 httpResponse.statusCode == 429 || httpResponse.statusCode == 503
@@ -603,8 +661,7 @@ public class DownloadUtils {
                 if itemType == "directory" {
                     try await listFiles(at: itemPath)
                 } else if itemType == "file" {
-                    let fileSize = item["size"] as? Int ?? -1
-                    filesToDownload.append((path: itemPath, size: fileSize))
+                    filesToDownload.append(remoteFile(from: item, path: itemPath))
                 }
             }
         }
@@ -621,12 +678,20 @@ public class DownloadUtils {
             let destPath = repoDirectory.appendingPathComponent(file.path)
 
             if FileManager.default.fileExists(atPath: destPath.path) {
-                progressHandler?(
-                    DownloadProgress(
-                        fractionCompleted: Double(index + 1) / Double(totalFiles),
-                        phase: .downloading(
-                            completedFiles: index + 1, totalFiles: totalFiles)))
-                continue
+                do {
+                    try validateDownloadedFile(at: destPath, against: file)
+                    progressHandler?(
+                        DownloadProgress(
+                            fractionCompleted: Double(index + 1) / Double(totalFiles),
+                            phase: .downloading(
+                                completedFiles: index + 1, totalFiles: totalFiles)))
+                    continue
+                } catch {
+                    logger.warning(
+                        "Cached \(file.path) failed integrity check: \(error.localizedDescription). Re-downloading."
+                    )
+                    try? FileManager.default.removeItem(at: destPath)
+                }
             }
 
             try FileManager.default.createDirectory(
@@ -636,6 +701,7 @@ public class DownloadUtils {
 
             if file.size == 0 {
                 FileManager.default.createFile(atPath: destPath.path, contents: Data())
+                try validateDownloadedFile(at: destPath, against: file)
                 progressHandler?(
                     DownloadProgress(
                         fractionCompleted: Double(index + 1) / Double(totalFiles),
@@ -649,7 +715,7 @@ public class DownloadUtils {
 
             let encodedPath =
                 file.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file.path
-            let fileURL = try ModelRegistry.resolveModel(repo.remotePath, encodedPath)
+            let fileURL = try ModelRegistry.resolveModel(repo.remotePath, encodedPath, revision: revision)
             let request = authorizedRequest(url: fileURL)
 
             let (tempURL, response) = try await sharedSession.download(for: request)
@@ -670,9 +736,7 @@ public class DownloadUtils {
                 )
             }
 
-            if FileManager.default.fileExists(atPath: destPath.path) {
-                try? FileManager.default.removeItem(at: destPath)
-            }
+            try validateDownloadedFile(at: tempURL, against: file)
             try FileManager.default.moveItem(at: tempURL, to: destPath)
 
             progressHandler?(

@@ -65,6 +65,7 @@ public enum PocketTtsResourceDownloader {
             .pocketTts,
             subdirectory: subdir,
             to: repoDir,
+            revision: ModelRegistry.pocketTtsRevision,
             progressHandler: progressHandler
         )
 
@@ -144,7 +145,8 @@ public enum PocketTtsResourceDownloader {
         try await DownloadUtils.downloadSubdirectory(
             .pocketTts,
             subdirectory: ModelNames.PocketTTS.mimiEncoderFile,
-            to: repoDir
+            to: repoDir,
+            revision: ModelRegistry.pocketTtsRevision
         )
 
         guard FileManager.default.fileExists(atPath: encoderPath.path) else {
@@ -177,7 +179,11 @@ public enum PocketTtsResourceDownloader {
 
         if !FileManager.default.fileExists(atPath: safetensorsURL.path) {
             let remotePath = "\(language.repoSubdirectory)/constants_bin/\(safetensorsFile)"
-            let remoteURL = try ModelRegistry.resolveModel(Repo.pocketTts.remotePath, remotePath)
+            let remoteURL = try ModelRegistry.resolveModel(
+                Repo.pocketTts.remotePath,
+                remotePath,
+                revision: ModelRegistry.pocketTtsRevision
+            )
             logger.info(
                 "Downloading voice '\(sanitized)' for \(language.rawValue) from HuggingFace (\(safetensorsFile))..."
             )
