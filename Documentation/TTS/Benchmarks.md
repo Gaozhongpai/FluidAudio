@@ -7,7 +7,7 @@
 > here are directly paper-comparable.
 > **Status:** Kokoro, Kokoro ANE, PocketTTS, Magpie, StyleTTS2 all
 > complete the English run; CosyVoice3 completes the full Mandarin
-> run.
+> run. Supertonic-3 completes the English run.
 >
 > [minimax]: https://huggingface.co/datasets/MiniMaxAI/TTS-Multilingual-Test-Set
 > [mms]: https://arxiv.org/abs/2505.07916
@@ -58,6 +58,7 @@ Reference each language as `--corpus minimax-<lang>`:
 | StyleTTS2   | `minimax-english`  | `english` only (LibriTTS multi-speaker)        |
 | Magpie      | `minimax-english`  | `english`, `spanish`, `german`, `french`, `italian`, `vietnamese`, `chinese`, `hindi` |
 | CosyVoice3  | `minimax-chinese`  | `chinese`, `cantonese`                         |
+| Supertonic-3 | `minimax-english` | 31 ISO codes minus `zh`: `english`, `korean`, `japanese`, `arabic`, `bulgarian`, `czech`, `danish`, `german`, `greek`, `spanish`, `estonian`, `finnish`, `french`, `hindi`, `croatian`, `hungarian`, `indonesian`, `italian`, `lithuanian`, `latvian`, `dutch`, `polish`, `portuguese`, `romanian`, `russian`, `slovak`, `slovenian`, `swedish`, `turkish`, `ukrainian`, `vietnamese`. Voice styling via `--voice-style <preset.json>` |
 
 Lines beginning with `#` are comments. Custom corpora can still be
 passed with `--corpus-path <file.txt>`.
@@ -78,7 +79,7 @@ Per phrase:
 - `wer`, `cer` — via Parakeet ASR roundtrip on the rendered WAV.
 - `stage_ms` — per-stage breakdown (backend-specific keys; populated
   for Kokoro ANE + Magpie; empty for Kokoro / PocketTTS /
-  StyleTTS2 / CosyVoice3).
+  StyleTTS2 / CosyVoice3 / Supertonic-3).
 - Backend-specific extras: `encoder_tokens`, `acoustic_frames`,
   `chunk_count`, `frame_count`, `code_count`, `finished_on_eos`,
   `generated_token_count`, etc.
@@ -105,6 +106,15 @@ swift run fluidaudio tts-benchmark \
   --compute-units default \
   --output-json bench.json \
   --audio-dir bench-wavs/
+
+# Supertonic-3 (multilingual, voice-style JSON). M1.json / F1.json / …
+# ship under FluidInference/supertonic-3-coreml/assets/voice_styles/.
+# `--lang` defaults are inferred from the corpus name; override with
+# `--language <iso>` (e.g. ja, ko, fr). No `zh` — Mandarin is Kokoro ANE.
+swift run fluidaudio tts-benchmark \
+  --backend supertonic3 --voice-style M1.json \
+  --corpus minimax-english \
+  --output-json bench-supertonic3.json --audio-dir bench-wavs-sup3/
 ```
 
 The harness writes a JSON report to `--output-json` and (optionally)
@@ -134,6 +144,7 @@ WER / CER.
 | StyleTTS2   | MIT         | en (LibriTTS multi-spk) | ~280 MB  | 955 s§     | 6671 / 15990 ms§    | 6671 / 15990 ms§    | 2.72×§   | 963 MB§  | 0.440§  | 0.241§  | full 100/100 `minimax-english` via [misaki→espeak post-pass remap](#styletts2-misaki--espeak-post-pass-remap); ref_s = LibriTTS `696_92939_000016_000006.wav` (StyleTTS2 demo voice) |
 | Magpie      | research    | en/es/de/fr/it/vi/zh/hi | ~1.3 GB   | 38.5 s∥    | **9580 / 23796 ms**∥ | 15080 / 29895 ms∥   | 0.64×∥   | 762 MB∥  | 0.056   | 0.033   | **streaming TTFT**: first audio chunk at 9.6 s p50 on M2 (full synth 15.1 s); split-K/V decoder; outputBackings fast path with latched fallback |
 | CosyVoice3  | Apache-2.0  | zh (mandarin)          | ~1.5 GB   | 29.2 s†    | 14091 / 23679 ms†   | 14091 / 23679 ms†   | 0.357×†  | 3302 MB† | n/a‡    | 0.017‡  | beta; full `minimax-chinese` (100/100 phrases) for latency / RSS and whisper-large-v3 CER‡; cantonese supported via [auto-chunker](#cosyvoice3-auto-chunker) but not benchmarked (no yue ASR) |
+| Supertonic-3 | Apache-2.0 | en (`M1`, 31-lang)        | ~0.40 GB                   | 44.1 kHz    | 128 codepoints / pass (chunker splits ≥110 char Latin / 90 CJK)  | No        | **479 / 6491 ms** | 479 / 6491 ms     | 5.55×     | 679 MB   | 0.8%   | 0.3%   | one-shot multilingual CoreML TTS |
 
 \* TTFT for **PocketTTS / Magpie** is first-frame emit through the
 streaming API; the others are one-shot, so `ttft_ms == synth_ms`.
@@ -209,6 +220,49 @@ the long-tail p95.
 | └── `decoder_step` | 14840   |
 | └── `sampler`      | 3081    |
 | `nanocodec`        | 17948   |
+
+### Supertonic-3 — per-language breakdown (M2, default preset, `M1` voice)
+
+Same harness, same `M1.json` voice style, same default
+(`--total-steps 8 --speed 1.05 --compute-units default`). All 10
+languages complete the full 100-phrase `minimax-<lang>` run.
+
+WER / CER for English is from the in-process Parakeet TDT
+roundtrip. The nine non-English rows were synthesized with
+`--skip-asr` (Parakeet is English-only), then scored offline by
+transcribing the saved WAVs with **`mlx-community/whisper-large-v3-turbo`**
+and computing WER / CER against the corpus references with
+`jiwer` after NFKC + lowercase + punctuation-strip normalization.
+Peak RSS is process-wide so the English row is inflated by the
+additional Parakeet models held in memory; the nine non-English
+rows reflect Supertonic-3 in isolation.
+
+| Language        | Code | Synth p50 / p95   | Agg RTFx | Peak RSS | WER†    | CER†   |
+|-----------------|------|-------------------|----------|----------|---------|--------|
+| English         | en   | **479 / 6491 ms** | 5.55×    | 679 MB‡  | 0.84%   | 0.32%  |
+| Arabic          | ar   | 427 / 5827 ms     | 6.76×    | 396 MB   | 3.81%   | 1.16%  |
+| French          | fr   | 926 / 5897 ms     | 5.58×    | 292 MB   | 3.32%   | 1.13%  |
+| German          | de   | **313 / 2318 ms** | 8.75×    | 345 MB   | **0.66%** | **0.45%** |
+| Italian         | it   | 691 / 4626 ms     | 11.05×   | 486 MB   | **0.64%** | **0.29%** |
+| Japanese        | ja   | 643 / 2058 ms     | 8.69×    | 329 MB   | 98.33%§ | 9.30%  |
+| Korean          | ko   | 438 / 1599 ms     | **11.36×** | 370 MB | 11.54%§ | 4.23%  |
+| Russian         | ru   | **321 / 6563 ms** | 7.97×    | 356 MB   | 4.06%   | 1.30%  |
+| Spanish         | es   | **354 / 583 ms**  | **15.90×** | 351 MB | 1.28%   | 0.57%  |
+| Vietnamese      | vi   | 776 / 3934 ms     | 7.02×    | 440 MB   | 9.60%   | 8.33%  |
+
+† Non-English WER / CER produced offline with
+`mlx-community/whisper-large-v3-turbo` against the saved WAVs;
+text normalized (NFKC + lowercase + punctuation strip) before
+scoring. English uses the in-process Parakeet TDT roundtrip.
+
+‡ English row includes Parakeet TDT loaded in-process for the
+ASR roundtrip; the other nine rows ran with `--skip-asr` so the
+RSS column reflects only the four Supertonic-3 graphs + indexer.
+
+§ Japanese / Korean have no whitespace word boundaries; `jiwer.wer`
+splits on whitespace, so the Japanese WER is meaningless (CER 9.3%
+is the right metric). Korean's WER is borderline meaningful because
+the corpus uses spaced words.
 
 ### About the WER / CER numbers
 
@@ -340,4 +394,3 @@ The 5/100 residual is the long-tail token-rate worst case (some
 Cantonese characters generate >9 speech tokens); raising the
 per-CJK heuristic further would over-fragment short phrases.
 Cleaner fix is the upstream Flow re-export.
-

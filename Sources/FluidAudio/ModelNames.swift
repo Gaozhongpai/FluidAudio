@@ -37,6 +37,12 @@ public enum Repo: String, CaseIterable, Sendable {
     case cohereTranscribeCoreml = "FluidInference/cohere-transcribe-03-2026-coreml/q8"
     case magpieTts = "FluidInference/magpie-tts-multilingual-357m-coreml"
     case styleTts2 = "FluidInference/StyleTTS-2-coreml"
+    /// Supertonic-3 multilingual TTS (31 langs). Republished CoreML
+    /// conversion of the upstream `Supertone/supertonic-3` ONNX checkpoint;
+    /// see `Scripts/convert_supertonic3_to_coreml.py` for the conversion
+    /// recipe. Ships four `.mlmodelc` bundles + `tts.json` +
+    /// `unicode_indexer.json` at the repo root.
+    case supertonic3 = "FluidInference/supertonic-3-coreml"
 
     /// Repository slug (without owner)
     public var name: String {
@@ -105,6 +111,8 @@ public enum Repo: String, CaseIterable, Sendable {
             return "magpie-tts-multilingual-357m-coreml"
         case .styleTts2:
             return "StyleTTS-2-coreml"
+        case .supertonic3:
+            return "supertonic-3-coreml"
         }
     }
 
@@ -229,6 +237,8 @@ public enum Repo: String, CaseIterable, Sendable {
             return "magpie-tts"
         case .styleTts2:
             return "styletts2"
+        case .supertonic3:
+            return "supertonic-3"
         default:
             return name.replacingOccurrences(of: "-coreml", with: "")
         }
@@ -885,6 +895,36 @@ public enum ModelNames {
         ]
     }
 
+    /// Supertonic-3 multilingual TTS — 4 `.mlmodelc` bundles + 2 companion
+    /// JSON files. File names match the HuggingFace tree at
+    /// `FluidInference/supertonic-3-coreml/`.
+    public enum Supertonic3 {
+        public static let textEncoder = "TextEncoder"
+        public static let durationPredictor = "DurationPredictor"
+        public static let vectorEstimator = "VectorEstimator"
+        public static let vocoder = "Vocoder"
+
+        public static let textEncoderFile = textEncoder + ".mlmodelc"
+        public static let durationPredictorFile = durationPredictor + ".mlmodelc"
+        public static let vectorEstimatorFile = vectorEstimator + ".mlmodelc"
+        public static let vocoderFile = vocoder + ".mlmodelc"
+
+        public static let configFile = "tts.json"
+        public static let unicodeIndexerFile = "unicode_indexer.json"
+
+        /// The four CoreML bundles required by `Supertonic3Synthesizer`.
+        public static let requiredModels: Set<String> = [
+            textEncoderFile,
+            durationPredictorFile,
+            vectorEstimatorFile,
+            vocoderFile,
+        ]
+
+        /// Models + companion JSON files the downloader must fetch.
+        public static let requiredFiles: Set<String> =
+            requiredModels.union([configFile, unicodeIndexerFile])
+    }
+
     /// Multilingual G2P (CharsiuG2P ByT5) model names
     public enum MultilingualG2P {
         public static let encoder = "MultilingualG2PEncoder"
@@ -1111,6 +1151,8 @@ public enum ModelNames {
             return ModelNames.CohereTranscribe.requiredModels
         case .magpieTts:
             return ModelNames.Magpie.requiredModels
+        case .supertonic3:
+            return ModelNames.Supertonic3.requiredFiles
         }
     }
 }

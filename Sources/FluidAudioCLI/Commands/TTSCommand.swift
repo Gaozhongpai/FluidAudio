@@ -1,3 +1,4 @@
+import CoreML
 import FluidAudio
 import Foundation
 
@@ -162,6 +163,12 @@ public struct TTS {
         var pocketLanguage: PocketTtsLanguage = .english
         // PocketTTS deterministic-seed mode (uses session API for fixed RNG).
         var pocketSeed: UInt64? = nil
+        // Supertonic-3 args.
+        var supertonicLanguage: String = "en"
+        var supertonicVoiceStylePath: String? = nil
+        var supertonicTotalSteps: Int = Supertonic3Constants.defaultTotalSteps
+        var supertonicSpeed: Float = Supertonic3Constants.defaultSpeed
+        var supertonicCpuOnly = false
 
         var i = 0
         while i < arguments.count {
@@ -238,9 +245,32 @@ public struct TTS {
                         cv3FrontendParityMode = true
                     case "kokoro-ane", "kokoroane", "lai":
                         backend = .kokoroAne
+                    case "supertonic3", "supertonic-3", "sup3":
+                        backend = .supertonic3
                     default:
                         logger.warning("Unknown backend '\(arguments[i + 1])'; using kokoro")
                     }
+                    i += 1
+                }
+            case "--fixture":
+            case "--lang":
+                if i + 1 < arguments.count {
+                    supertonicLanguage = arguments[i + 1].lowercased()
+                    i += 1
+                }
+            case "--voice-style":
+                if i + 1 < arguments.count {
+                    supertonicVoiceStylePath = arguments[i + 1]
+                    i += 1
+                }
+            case "--total-steps":
+                if i + 1 < arguments.count, let v = Int(arguments[i + 1]) {
+                    supertonicTotalSteps = v
+                    i += 1
+                }
+            case "--speed":
+                if i + 1 < arguments.count, let v = Float(arguments[i + 1]) {
+                    supertonicSpeed = v
                     i += 1
                 }
             case "--fixture":
@@ -265,6 +295,7 @@ public struct TTS {
                 }
             case "--cpu-only":
                 cv3CpuOnly = true
+                supertonicCpuOnly = true
             case "--no-replay":
                 cv3ReplayTokens = false
             case "--tokenizer-dir":
@@ -471,6 +502,20 @@ public struct TTS {
             await runKokoroAne(
                 text: text, output: output, voice: voice, metricsPath: metricsPath,
                 variant: kokoroAneVariant)
+            return
+        }
+
+        if backend == .supertonic3 {
+            await runSupertonic3(
+                text: text,
+                output: output,
+                language: supertonicLanguage,
+                voiceStylePath: supertonicVoiceStylePath,
+                totalSteps: supertonicTotalSteps,
+                speed: supertonicSpeed,
+                metricsPath: metricsPath,
+                cpuOnly: supertonicCpuOnly
+            )
             return
         }
 
@@ -1051,6 +1096,97 @@ public struct TTS {
         }
     }
 
+    /// Run Supertonic-3 multilingual TTS. Requires a voice-style JSON
+    /// (any preset from `voice_styles/` in the HF repo, e.g. `M1.json`).
+    private static func runSupertonic3(
+        text: String, output: String, language: String,
+        voiceStylePath: String?,
+        totalSteps: Int, speed: Float,
+        metricsPath: String?, cpuOnly: Bool
+    ) async {
+        guard let voiceStylePath else {
+            logger.error(
+                "supertonic3 backend requires --voice-style <path/to/style.json>")
+            return
+        }
+        do {
+            let tStart = Date()
+            let computeUnits: MLComputeUnits = cpuOnly ? .cpuOnly : .cpuAndNeuralEngine
+            let manager = Supertonic3Manager(computeUnits: computeUnits)
+
+            let tLoad0 = Date()
+            try await manager.initialize()
+            let tLoad1 = Date()
+
+            let voiceStyleURL = resolveInputURL(voiceStylePath)
+            let style = try Supertonic3VoiceStyle.load(from: voiceStyleURL)
+            logger.info("Supertonic-3 voice style: \(voiceStyleURL.path)")
+            logger.info(
+                "Supertonic-3 lang=\(language) totalSteps=\(totalSteps) "
+                    + "speed=\(String(format: "%.2f", speed))")
+
+            let tSynth0 = Date()
+            let result = try await manager.synthesize(
+                text: text, language: language, style: style,
+                totalSteps: totalSteps, speed: speed)
+            let tSynth1 = Date()
+
+            let outURL = resolveInputURL(output)
+            try FileManager.default.createDirectory(
+                at: outURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            let wav = try AudioWAV.data(
+                from: result.samples,
+                sampleRate: Double(Supertonic3Constants.sampleRate))
+            try wav.write(to: outURL)
+
+            let loadS = tLoad1.timeIntervalSince(tLoad0)
+            let synthS = tSynth1.timeIntervalSince(tSynth0)
+            let totalS = tSynth1.timeIntervalSince(tStart)
+            let audioSecs =
+                Double(result.samples.count) / Double(Supertonic3Constants.sampleRate)
+            let rtfx = synthS > 0 ? audioSecs / synthS : 0
+
+            logger.info("Supertonic-3 synthesis complete")
+            logger.info("  Load: \(String(format: "%.3f", loadS))s")
+            logger.info("  Synthesis: \(String(format: "%.3f", synthS))s")
+            logger.info("  Audio: \(String(format: "%.3f", audioSecs))s")
+            logger.info("  RTFx: \(String(format: "%.2f", rtfx))x")
+            logger.info("  Total: \(String(format: "%.3f", totalS))s")
+            logger.info("  Output: \(outURL.path)")
+
+            if let metricsPath {
+                let metricsDict: [String: Any] = [
+                    "backend": "supertonic3",
+                    "text": text,
+                    "language": language,
+                    "voice_style": voiceStyleURL.path,
+                    "total_steps": totalSteps,
+                    "speed": Double(speed),
+                    "output": outURL.path,
+                    "model_load_time_s": loadS,
+                    "inference_time_s": synthS,
+                    "audio_duration_s": audioSecs,
+                    "realtime_speed": rtfx,
+                    "total_time_s": totalS,
+                ]
+                let artifactsRoot = try ensureArtifactsRoot()
+                let mURL = resolveOutputURL(
+                    metricsPath, artifactsRoot: artifactsRoot, expectsDirectory: false)
+                try FileManager.default.createDirectory(
+                    at: mURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
+                let json = try JSONSerialization.data(
+                    withJSONObject: metricsDict, options: [.prettyPrinted])
+                try json.write(to: mURL)
+                logger.info("Metrics saved: \(mURL.path)")
+            }
+        } catch {
+            logger.error("Supertonic-3 Error: \(error)")
+            print("Supertonic-3 failed: \(error)")
+            exit(1)
+        }
+    }
     private static func printUsage() {
         print(
             """
@@ -1060,13 +1196,19 @@ public struct TTS {
               --output, -o         Output WAV path (default: output.wav)
               --voice, -v          Voice name (default: af_heart for Kokoro, alba for PocketTTS)
               --backend            TTS backend: kokoro (default), pocket, kokoro-ane,
-                                   or cosyvoice3 [BETA — slow, RTFx < 1.0]
+                                   supertonic3, or cosyvoice3 [BETA — slow, RTFx < 1.0]
                                    CosyVoice3 dev sub-backends:
                                      cosyvoice3-parity            Phase 1 fixture parity harness
                                      cosyvoice3-frontend-parity   lm_input_embeds parity vs Python
                                      cosyvoice3-tokenizer-parity  Qwen2 BPE round-trip
                                    (Production cosyvoice3 backend auto-downloads
                                     assets from HuggingFace on first synthesis.)
+                                   Supertonic-3:
+                                     --voice-style <file.json>  required (e.g. voice_styles/M1.json)
+                                     --lang en                  ISO-639-1 language code (default en)
+                                     --total-steps 8            denoising step count
+                                     --speed 1.05               duration multiplier
+                                     --cpu-only                 disable Neural Engine
               --lexicon, -l        Custom pronunciation lexicon file (word=phonemes format, Kokoro only)
               --benchmark          Run a predefined benchmarking suite with multiple sentences
               --variant            Force Kokoro 5s/15s model (values: 5s,15s) OR
