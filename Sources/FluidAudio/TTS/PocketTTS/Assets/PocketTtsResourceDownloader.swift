@@ -25,9 +25,14 @@ public enum PocketTtsResourceDownloader {
     ///
     /// Note: the upstream `v2/<lang>/` directory ships both flowlm variants,
     /// so a fresh download pulls the unused variant too. After download
-    /// completes, the unused FlowLM `.mlmodelc` and `.mlpackage` directories
-    /// are deleted so only the requested precision occupies disk
-    /// (~217 MB savings for `.int8`, ~75 MB savings for `.fp16`).
+    /// completes, the unused FlowLM `.mlmodelc` directory is deleted so only
+    /// the requested precision occupies disk.
+    ///
+    /// The downloader also skips redundant repo artifacts entirely:
+    /// `.mlpackage` sources, `constants/` conversion intermediates,
+    /// `verify.wav`, and `.DS_Store`. The compact Milo/Pai pack is still
+    /// selected through `ModelRegistry.pocketTtsVersionDirectory` and pinned
+    /// by `ModelRegistry.pocketTtsRevision`.
     public static func ensureModels(
         language: PocketTtsLanguage,
         directory: URL? = nil,
@@ -66,7 +71,8 @@ public enum PocketTtsResourceDownloader {
             subdirectory: subdir,
             to: repoDir,
             revision: ModelRegistry.pocketTtsRevision,
-            progressHandler: progressHandler
+            progressHandler: progressHandler,
+            shouldSkip: Self.shouldSkipAsset(at:)
         )
 
         // The upstream HF subdir contains both FlowLM precisions; delete the
@@ -79,9 +85,24 @@ public enum PocketTtsResourceDownloader {
         return languageRoot
     }
 
-    /// Delete the FlowLM `.mlmodelc` and `.mlpackage` directories that don't
-    /// match the requested precision. Idempotent — silently skips paths that
-    /// don't exist.
+    @Sendable
+    private static func shouldSkipAsset(at path: String) -> Bool {
+        let basename = (path as NSString).lastPathComponent
+        if basename == ".DS_Store" || basename == "verify.wav" {
+            return true
+        }
+        if basename.hasSuffix(".mlpackage") || path.contains(".mlpackage/") {
+            return true
+        }
+        for component in path.split(separator: "/") where component == "constants" {
+            return true
+        }
+        return false
+    }
+
+    /// Delete FlowLM artifacts that don't match the requested precision.
+    /// Idempotent, and keeps cleanup support for older caches that may
+    /// already contain the corresponding `.mlpackage` directory.
     private static func removeUnusedFlowlmVariant(
         at languageRoot: URL,
         keeping precision: PocketTtsPrecision

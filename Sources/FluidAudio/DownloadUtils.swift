@@ -626,12 +626,17 @@ public class DownloadUtils {
     ///   - subdirectory: Path within the repo to download (e.g. `"mimi_encoder.mlmodelc"`).
     ///   - repoDirectory: Local directory corresponding to the repo root.
     ///     Files are saved at `repoDirectory/<remote_path>`.
+    ///   - shouldSkip: Optional predicate evaluated on each remote path
+    ///     before recursing into directories or adding files. Return `true`
+    ///     to exclude dead weight such as `.mlpackage` sources when a compiled
+    ///     `.mlmodelc` is the artifact CoreML actually loads.
     public static func downloadSubdirectory(
         _ repo: Repo,
         subdirectory: String,
         to repoDirectory: URL,
         revision: String = "main",
-        progressHandler: ProgressHandler? = nil
+        progressHandler: ProgressHandler? = nil,
+        shouldSkip: (@Sendable (String) -> Bool)? = nil
     ) async throws {
         progressHandler?(DownloadProgress(fractionCompleted: 0.0, phase: .listing))
         var filesToDownload: [RemoteFile] = []
@@ -657,6 +662,10 @@ public class DownloadUtils {
                 guard let itemPath = item["path"] as? String,
                     let itemType = item["type"] as? String
                 else { continue }
+
+                if shouldSkip?(itemPath) == true {
+                    continue
+                }
 
                 if itemType == "directory" {
                     try await listFiles(at: itemPath)
