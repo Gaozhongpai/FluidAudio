@@ -252,7 +252,6 @@ public struct TTS {
                     }
                     i += 1
                 }
-            case "--fixture":
             case "--lang":
                 if i + 1 < arguments.count {
                     supertonicLanguage = arguments[i + 1].lowercased()
@@ -511,6 +510,7 @@ public struct TTS {
                 output: output,
                 language: supertonicLanguage,
                 voiceStylePath: supertonicVoiceStylePath,
+                voiceName: voice,
                 totalSteps: supertonicTotalSteps,
                 speed: supertonicSpeed,
                 metricsPath: metricsPath,
@@ -1096,19 +1096,15 @@ public struct TTS {
         }
     }
 
-    /// Run Supertonic-3 multilingual TTS. Requires a voice-style JSON
-    /// (any preset from `voice_styles/` in the HF repo, e.g. `M1.json`).
+    /// Run Supertonic-3 multilingual TTS. Voice comes from a built-in style
+    /// (`--voice F1`..`M5`, downloaded on demand, default `M1`) or an explicit
+    /// `--voice-style <file.json>`, which overrides `--voice`.
     private static func runSupertonic3(
         text: String, output: String, language: String,
-        voiceStylePath: String?,
+        voiceStylePath: String?, voiceName: String,
         totalSteps: Int, speed: Float,
         metricsPath: String?, cpuOnly: Bool
     ) async {
-        guard let voiceStylePath else {
-            logger.error(
-                "supertonic3 backend requires --voice-style <path/to/style.json>")
-            return
-        }
         do {
             let tStart = Date()
             let computeUnits: MLComputeUnits = cpuOnly ? .cpuOnly : .cpuAndNeuralEngine
@@ -1118,9 +1114,27 @@ public struct TTS {
             try await manager.initialize()
             let tLoad1 = Date()
 
-            let voiceStyleURL = resolveInputURL(voiceStylePath)
-            let style = try Supertonic3VoiceStyle.load(from: voiceStyleURL)
-            logger.info("Supertonic-3 voice style: \(voiceStyleURL.path)")
+            // Voice resolution: an explicit --voice-style <path> wins; otherwise
+            // --voice names a built-in (F1-F5, M1-M5), defaulting to M1.
+            let style: Supertonic3VoiceStyle
+            if let voiceStylePath {
+                let voiceStyleURL = resolveInputURL(voiceStylePath)
+                style = try Supertonic3VoiceStyle.load(from: voiceStyleURL)
+                logger.info("Supertonic-3 voice style (file): \(voiceStyleURL.path)")
+            } else {
+                let selected = Supertonic3Voice(name: voiceName) ?? .default
+                if Supertonic3Voice(name: voiceName) == nil
+                    && voiceName != TtsConstants.recommendedVoice
+                {
+                    logger.warning(
+                        "Unknown Supertonic-3 voice '\(voiceName)'; using "
+                            + "\(Supertonic3Voice.default.rawValue). Valid voices: "
+                            + Supertonic3Voice.allCases.map(\.rawValue).joined(separator: ", ")
+                            + ".")
+                }
+                style = try await Supertonic3ResourceDownloader.loadVoiceStyle(selected)
+                logger.info("Supertonic-3 voice: \(selected.rawValue) (built-in)")
+            }
             logger.info(
                 "Supertonic-3 lang=\(language) totalSteps=\(totalSteps) "
                     + "speed=\(String(format: "%.2f", speed))")
@@ -1160,7 +1174,7 @@ public struct TTS {
                     "backend": "supertonic3",
                     "text": text,
                     "language": language,
-                    "voice_style": voiceStyleURL.path,
+                    "voice_style": style.name,
                     "total_steps": totalSteps,
                     "speed": Double(speed),
                     "output": outURL.path,
@@ -1203,8 +1217,9 @@ public struct TTS {
                                      cosyvoice3-tokenizer-parity  Qwen2 BPE round-trip
                                    (Production cosyvoice3 backend auto-downloads
                                     assets from HuggingFace on first synthesis.)
-                                   Supertonic-3:
-                                     --voice-style <file.json>  required (e.g. voice_styles/M1.json)
+                                   Supertonic-3 (multilingual, 31 langs, 44.1 kHz):
+                                     --voice F3                 built-in voice F1-F5/M1-M5 (default M1)
+                                     --voice-style <file.json>  custom style file (overrides --voice)
                                      --lang en                  ISO-639-1 language code (default en)
                                      --total-steps 8            denoising step count
                                      --speed 1.05               duration multiplier
