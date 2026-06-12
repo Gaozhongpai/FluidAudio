@@ -45,6 +45,11 @@ public enum KokoroAneConstants {
     public static let defaultFirstChunkPhonemeLimit = 180
     public static let defaultChunkPhonemeLimit = 480
 
+    /// Silence inserted between separately synthesized chunks when a chunk ends
+    /// at natural punctuation. Mid-clause budget splits stay contiguous.
+    public static let pauseSentenceMs: Int = 220
+    public static let pauseClauseMs: Int = 80
+
     // MARK: - Mandarin G2P assets
 
     /// Local subdirectory (relative to the cached `ANE-zh/` repo dir) for

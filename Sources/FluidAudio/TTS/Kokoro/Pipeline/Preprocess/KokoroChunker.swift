@@ -316,7 +316,7 @@ enum KokoroChunker {
                     atoms: chunkAtoms,
                     phonemes: chunkPhonemes,
                     totalFrames: 0,
-                    pauseAfterMs: 0,
+                    pauseAfterMs: pauseAfterMs(for: textValue),
                     text: textValue
                 )
             )
@@ -789,8 +789,8 @@ enum KokoroChunker {
 
         var segments: [String] = []
         var currentStart = text.startIndex
-        let breakCharacters = CharacterSet(charactersIn: ",;:")
-        let separatorTokens = [": ", "; ", ", "]
+        let breakCharacters = CharacterSet(charactersIn: ",;:，；：、")
+        let separatorTokens = [": ", "; ", ", ", "：", "；", "，", "、"]
 
         let tagger = NLTagger(tagSchemes: [.lexicalClass])
         tagger.string = text
@@ -852,6 +852,25 @@ enum KokoroChunker {
         return base + " " + trimmedNext
     }
 
+    private static func pauseAfterMs(for text: String) -> Int {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+
+        for character in trimmed.reversed() {
+            if trailingBoundaryCharacters.contains(character) {
+                continue
+            }
+            if sentenceBoundaryCharacters.contains(character) {
+                return pauseSentenceMs
+            }
+            if clauseBoundaryCharacters.contains(character) {
+                return pauseClauseMs
+            }
+            return 0
+        }
+        return 0
+    }
+
     private static func spelledOutTokens(for token: String) -> [String]? {
         guard !token.isEmpty else { return nil }
         if token.rangeOfCharacter(from: decimalDigits.inverted) != nil {
@@ -869,7 +888,20 @@ enum KokoroChunker {
     }
 
     private static let noPrespaceCharacters: Set<Character> = [
-        ",", ";", ":", "!", "?", ".", "…", "—", "–", "'", "\"", ")", "]", "}", "”", "’",
+        ",", ";", ":", "!", "?", ".", "…", "—", "–", "，", "；", "：", "！", "？", "。",
+        "、", "'", "\"", ")", "]", "}", "）", "】", "”", "’", "」", "』",
+    ]
+
+    private static let pauseSentenceMs = 220
+    private static let pauseClauseMs = 80
+    private static let sentenceBoundaryCharacters: Set<Character> = [
+        ".", "!", "?", "…", "。", "！", "？"
+    ]
+    private static let clauseBoundaryCharacters: Set<Character> = [
+        ",", ";", ":", "，", "；", "：", "、", "—", "–"
+    ]
+    private static let trailingBoundaryCharacters: Set<Character> = [
+        "\"", "'", "”", "’", ")", "]", "}", "）", "】", "」", "』", "》"
     ]
 
     private static let letterPronunciations: [String: [String]] = [

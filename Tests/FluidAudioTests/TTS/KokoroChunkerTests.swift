@@ -122,4 +122,27 @@ final class KokoroChunkerTests: XCTestCase {
             "Override phonemes should be applied after the emoji"
         )
     }
+
+    func testPauseMetadataFollowsChinesePunctuation() async throws {
+        let text = "你好，世界。"
+        let lexicon: [String: [String]] = [
+            "你好": ["n"],
+            "世界": ["s"],
+        ]
+        let allowed: Set<String> = ["n", "s", "，", "。"]
+
+        let chunks = try await KokoroChunker.chunk(
+            text: text,
+            wordToPhonemes: lexicon,
+            caseSensitiveLexicon: [:],
+            customLexicon: nil,
+            targetTokens: 16,
+            hasLanguageToken: false,
+            allowedPhonemes: allowed,
+            phoneticOverrides: []
+        )
+
+        XCTAssertEqual(chunks.map(\.text), ["你好，", "世界。"])
+        XCTAssertEqual(chunks.map(\.pauseAfterMs), [80, 220])
+    }
 }

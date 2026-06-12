@@ -35,6 +35,15 @@ public actor KokoroAneManager {
     private static let chunkSoftBreakCharacters: Set<Character> = [
         ".", "!", "?", ";", ",", "。", "！", "？", "；", "，", "、", "\n"
     ]
+    private static let sentenceBoundaryCharacters: Set<Character> = [
+        ".", "!", "?", "…", "。", "！", "？"
+    ]
+    private static let clauseBoundaryCharacters: Set<Character> = [
+        ",", ";", ":", "，", "；", "：", "、", "—", "–"
+    ]
+    private static let trailingBoundaryCharacters: Set<Character> = [
+        "\"", "'", "”", "’", ")", "]", "}", "）", "】", "」", "』", "》"
+    ]
     private let store: KokoroAneModelStore
     private let variant: KokoroAneVariant
     private var defaultVoice: String
@@ -132,12 +141,8 @@ public actor KokoroAneManager {
         speed: Float = KokoroAneConstants.defaultSpeed
     ) async throws -> KokoroAneSynthesisResult {
         let chunks = try await synthesisChunks(text: text)
-        guard let first = chunks.first else {
+        guard !chunks.isEmpty else {
             throw KokoroAneError.inputProcessingFailed("(empty input)")
-        }
-
-        if chunks.count == 1 {
-            return try await runChain(phonemes: first.phonemes, voice: voice, speed: speed)
         }
 
         var samples: [Float] = []
@@ -145,9 +150,12 @@ public actor KokoroAneManager {
         var encoderTokens = 0
         var acousticFrames = 0
 
-        for chunk in chunks {
+        for (index, chunk) in chunks.enumerated() {
             let result = try await runChain(phonemes: chunk.phonemes, voice: voice, speed: speed)
             samples.append(contentsOf: result.samples)
+            if index < chunks.count - 1 {
+                samples.append(contentsOf: Self.pauseSamples(milliseconds: chunk.pauseAfterMs))
+            }
             Self.add(result.timings, to: &timings)
             encoderTokens += result.encoderTokens
             acousticFrames += result.acousticFrames
@@ -197,7 +205,13 @@ public actor KokoroAneManager {
                 currentPhonemes.removeAll(keepingCapacity: true)
                 return
             }
-            chunks.append(KokoroAneTextChunk(text: text, phonemes: currentPhonemes))
+            chunks.append(
+                KokoroAneTextChunk(
+                    text: text,
+                    phonemes: currentPhonemes,
+                    pauseAfterMs: Self.pauseAfterMs(for: text)
+                )
+            )
             currentText.removeAll(keepingCapacity: true)
             currentPhonemes.removeAll(keepingCapacity: true)
         }
@@ -329,7 +343,13 @@ public actor KokoroAneManager {
         for pieceText in Self.softTextPieces(from: text) {
             let phonemes = try await phonemizeForCurrentVariant(text: pieceText)
             if !phonemes.isEmpty {
-                pieces.append(KokoroAneTextChunk(text: pieceText, phonemes: phonemes))
+                pieces.append(
+                    KokoroAneTextChunk(
+                        text: pieceText,
+                        phonemes: phonemes,
+                        pauseAfterMs: Self.pauseAfterMs(for: pieceText)
+                    )
+                )
             }
         }
         return pieces
@@ -375,13 +395,22 @@ public actor KokoroAneManager {
         for character in characters {
             let candidate = current + String(character)
             let candidatePhonemes = try await phonemizeForCurrentVariant(text: candidate)
-            if candidatePhonemes.count > currentLimit(), !current.isEmpty {
+            if candidatePhonemes.count > currentLimit(), !current.isEmpty,
+                !(Self.chunkSoftBreakCharacters.contains(character)
+                    && candidatePhonemes.count <= KokoroAneConstants.maxPhonemeLength)
+            {
                 let textToFlush = current.trimmingCharacters(in: .whitespacesAndNewlines)
                 current.removeAll(keepingCapacity: true)
                 if !textToFlush.isEmpty {
                     let phonemes = try await phonemizeForCurrentVariant(text: textToFlush)
                     if !phonemes.isEmpty {
-                        chunks.append(KokoroAneTextChunk(text: textToFlush, phonemes: phonemes))
+                        chunks.append(
+                            KokoroAneTextChunk(
+                                text: textToFlush,
+                                phonemes: phonemes,
+                                pauseAfterMs: Self.pauseAfterMs(for: textToFlush)
+                            )
+                        )
                     }
                 }
                 current = String(character)
@@ -395,10 +424,41 @@ public actor KokoroAneManager {
         if !textToFlush.isEmpty {
             let phonemes = try await phonemizeForCurrentVariant(text: textToFlush)
             if !phonemes.isEmpty {
-                chunks.append(KokoroAneTextChunk(text: textToFlush, phonemes: phonemes))
+                chunks.append(
+                    KokoroAneTextChunk(
+                        text: textToFlush,
+                        phonemes: phonemes,
+                        pauseAfterMs: Self.pauseAfterMs(for: textToFlush)
+                    )
+                )
             }
         }
         return chunks.isEmpty ? [chunk] : chunks
+    }
+
+    static func pauseAfterMs(for text: String) -> Int {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+
+        for character in trimmed.reversed() {
+            if trailingBoundaryCharacters.contains(character) {
+                continue
+            }
+            if sentenceBoundaryCharacters.contains(character) {
+                return KokoroAneConstants.pauseSentenceMs
+            }
+            if clauseBoundaryCharacters.contains(character) {
+                return KokoroAneConstants.pauseClauseMs
+            }
+            return 0
+        }
+        return 0
+    }
+
+    private static func pauseSamples(milliseconds: Int) -> [Float] {
+        guard milliseconds > 0 else { return [] }
+        let count = (milliseconds * KokoroAneConstants.sampleRate) / 1_000
+        return Array(repeating: 0, count: count)
     }
 
     private func phonemizeForCurrentVariant(text: String) async throws -> String {
@@ -406,8 +466,8 @@ public actor KokoroAneManager {
         case .english:
             return try await phonemize(text: text)
         case .mandarin:
-            try await store.loadIfNeeded()
             if MandarinG2P.looksLikeHanzi(text) {
+                try await store.loadIfNeeded()
                 let g2p = try await store.mandarinG2PPipeline()
                 return try g2p.phonemize(text)
             } else {

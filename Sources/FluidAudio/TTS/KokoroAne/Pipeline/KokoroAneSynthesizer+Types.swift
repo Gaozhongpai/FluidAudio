@@ -57,13 +57,16 @@ public struct KokoroAneTextChunk: Sendable, Equatable {
     public let text: String
     /// IPA/Bopomofo sequence passed directly into `KokoroAneVocab.encode`.
     public let phonemes: String
+    /// Silence to append if another chunk follows this one.
+    public let pauseAfterMs: Int
 
     /// Character count of the phoneme sequence, excluding BOS/EOS.
     public var phonemeCount: Int { phonemes.count }
 
-    public init(text: String, phonemes: String) {
+    public init(text: String, phonemes: String, pauseAfterMs: Int = 0) {
         self.text = text
         self.phonemes = phonemes
+        self.pauseAfterMs = pauseAfterMs
     }
 }
 
