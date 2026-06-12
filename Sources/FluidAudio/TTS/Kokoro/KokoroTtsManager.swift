@@ -16,7 +16,7 @@ import OSLog
 /// For the ANE-resident sibling, see ``KokoroAneManager`` — it splits the model
 /// into 7 stages so the ANE-friendly layers can stay resident on the Neural
 /// Engine (3-11× faster on Apple Silicon), at the cost of a single voice
-/// (`af_heart`), no chunking (≤512 IPA tokens), and no custom lexicon. The
+/// (`af_heart`), phoneme-aware chunking, and no custom lexicon. The
 /// ANE variant lives at `FluidInference/kokoro-82m-coreml/ANE/` (sibling of
 /// the single-graph export).
 ///

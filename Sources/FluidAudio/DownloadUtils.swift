@@ -303,10 +303,13 @@ public class DownloadUtils {
 
         // Build patterns for filtering (relative to subPath if present)
         var patterns: [String] = []
+        var requiredFilePaths = Set<String>()
         for model in requiredModels {
             if let sub = subPath {
+                requiredFilePaths.insert("\(sub)/\(model)")
                 patterns.append("\(sub)/\(model)/")
             } else {
+                requiredFilePaths.insert(model)
                 patterns.append("\(model)/")
             }
         }
@@ -362,9 +365,7 @@ public class DownloadUtils {
                         let isInSubPath = itemPath.hasPrefix("\(sub)/")
                         let matchesPattern =
                             patterns.isEmpty || patterns.contains { itemPath.hasPrefix($0) }
-                        let isMetadata =
-                            itemPath.hasSuffix(".json") || itemPath.hasSuffix(".model") || itemPath.hasSuffix(".bin")
-                        shouldInclude = isInSubPath && (matchesPattern || isMetadata)
+                        shouldInclude = isInSubPath && (matchesPattern || requiredFilePaths.contains(itemPath))
                     } else {
                         shouldInclude =
                             patterns.isEmpty || patterns.contains { itemPath.hasPrefix($0) }

@@ -51,6 +51,22 @@ public struct KokoroAneSynthesisResult: Sendable {
     }
 }
 
+/// Text plus the already-phonemized sequence for one KokoroAne synthesis unit.
+public struct KokoroAneTextChunk: Sendable, Equatable {
+    /// Original text covered by this synthesis chunk.
+    public let text: String
+    /// IPA/Bopomofo sequence passed directly into `KokoroAneVocab.encode`.
+    public let phonemes: String
+
+    /// Character count of the phoneme sequence, excluding BOS/EOS.
+    public var phonemeCount: Int { phonemes.count }
+
+    public init(text: String, phonemes: String) {
+        self.text = text
+        self.phonemes = phonemes
+    }
+}
+
 /// One of the 7 stages in the laishere chain.
 public enum KokoroAneStage: String, CaseIterable, Sendable {
     case albert

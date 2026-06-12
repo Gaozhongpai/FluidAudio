@@ -39,6 +39,12 @@ public enum KokoroAneConstants {
     /// Default playback speed factor for PostAlbert.
     public static let defaultSpeed: Float = 1.0
 
+    /// Default phoneme budgets for chunk-level streaming. The first chunk stays
+    /// intentionally small for fast first audio; later chunks stay near the
+    /// 510-token model limit for better throughput and prosody.
+    public static let defaultFirstChunkPhonemeLimit = 180
+    public static let defaultChunkPhonemeLimit = 480
+
     // MARK: - Mandarin G2P assets
 
     /// Local subdirectory (relative to the cached `ANE-zh/` repo dir) for
