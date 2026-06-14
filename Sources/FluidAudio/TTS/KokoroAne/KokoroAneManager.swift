@@ -3,12 +3,20 @@ import Foundation
 /// High-level facade for the Kokoro 82M 7-stage CoreML chain
 /// (ANE-resident, derived from [laishere/kokoro-coreml](https://github.com/laishere/kokoro-coreml)).
 ///
-/// Splits the model so ANE-friendly layers (Albert / PostAlbert / Alignment /
-/// Vocoder) stay resident on the Neural Engine while Prosody / Noise / Tail
-/// run on CPU+GPU. Yields **3-11× RTFx** on Apple Silicon vs. the single-graph
-/// ``KokoroTtsManager``.
+/// Splits the model into 7 CoreML graphs with per-stage compute-unit
+/// placement (``KokoroAneComputeUnits``). Multi-graph splitting yields a large
+/// RTFx win over a single-graph CPU+GPU Kokoro implementation, while MiloFlow's
+/// fork keeps phoneme-aware chunking for lower first-audio latency and natural
+/// Mandarin punctuation pauses.
 ///
-/// Trade-offs vs. ``KokoroTtsManager``:
+/// Constraints:
+///   * One default voice per variant (`af_heart` for English, `zf_001` for
+///     Mandarin); additional voices download on demand via ``setDefaultVoice``
+///     / `voice:` / `initialize(preloadVoices:)`.
+///   * IPA/Bopomofo input capped at 512 tokens per CoreML pass; longer prompts
+///     are split into phoneme-safe chunks.
+///   * Loads from HF path `kokoro-82m-coreml/ANE/` (English) or
+///     `ANE-zh/` (Mandarin).
 ///
 /// |                  | ``KokoroTtsManager``      | ``KokoroAneManager``         |
 /// |------------------|---------------------------|------------------------------|
